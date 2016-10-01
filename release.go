@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jehiah/go-strftime"
@@ -17,9 +20,10 @@ type Release struct {
 	ReleasesDir	string
 	ReleaseDir	string
 	CurrentDir	string
+	KeepReleases	int
 }
 
-func NewRelease(deployDir string) *Release {
+func NewRelease(deployDir string, keep int) *Release {
 	deployDir, _ = filepath.Abs(deployDir)
 	currentDir := filepath.Join(deployDir, "current")
 	releasesDir := filepath.Join(deployDir, "releases")
@@ -37,6 +41,7 @@ func NewRelease(deployDir string) *Release {
 		ReleasesDir: releasesDir,
 		ReleaseDir: releaseDir,
 		CurrentDir: currentDir,
+		KeepReleases: keep,
 	}
 	return r
 }
@@ -95,6 +100,30 @@ func (r *Release) Symlink() error {
 
 // Clean up old releases
 func (r *Release) Cleanup() error {
+	if !osutil.ExistsDir(r.DeployDir) {
+		return errors.Errorf("No such directory: %s", r.DeployDir)
+	}
+
+	out, err := exec.Command("ls", "-1tr", r.ReleasesDir).Output()
+	if err != nil {
+		return errors.Wrapf(err, "Failed to list releases %s", r.ReleasesDir)
+	}
+	timestamps := strings.Split(string(out), "\n")
+	if len(timestamps) > r.KeepReleases {
+		n := len(timestamps) - 1 - r.KeepReleases
+		dirs := timestamps[0:n]
+		if len(dirs) > 0 {
+			var dirsStr string
+			for _, dir := range dirs {
+				dirsStr = strings.Join([]string{dirsStr, filepath.Join(r.ReleasesDir, dir)}, " ")
+			}
+			rmCmd := fmt.Sprintf("rm -fr %s", dirsStr)
+			if err := osutil.RunCmd("/bin/bash", "-c", rmCmd); err != nil {
+				return errors.Wrapf(err, "Failed to remove %s", dirsStr)
+			}
+		}
+	}
+
 	return nil
 }
 

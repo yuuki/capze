@@ -29,6 +29,7 @@ func Run(args []string) int {
 		fmt.Fprint(os.Stderr, helpText)
 	}
 	flags.IntVar(&keep, "keep", 3, "")
+	flags.IntVar(&keep, "k", 3, "")
 	flags.BoolVar(&isRollback, "rollback", false, "")
 	flags.BoolVar(&isDebug, "debug", false, "")
 
@@ -50,7 +51,7 @@ func Run(args []string) int {
 
 		originDir, deployDir = filepath.Clean(paths[0]), filepath.Clean(paths[1])
 
-		release := NewRelease(deployDir)
+		release := NewRelease(deployDir, keep)
 		if err := release.Deploy(originDir); err != nil {
 			if isDebug {
 				fmt.Fprintf(os.Stderr, "%+v\n", err)
