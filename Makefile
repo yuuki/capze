@@ -1,4 +1,4 @@
-NAME=caplize
+NAME=capze
 
 all: build
 

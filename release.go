@@ -11,7 +11,7 @@ import (
 	"github.com/jehiah/go-strftime"
 	"github.com/pkg/errors"
 
-	"github.com/yuuki/caplize/osutil"
+	"github.com/yuuki/capze/osutil"
 )
 
 type Release struct {

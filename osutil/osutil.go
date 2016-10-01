@@ -9,7 +9,7 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/yuuki/caplize/log"
+	"github.com/yuuki/capze/log"
 )
 
 func ExistsFile(file string) bool {
