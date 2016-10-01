@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/pkg/errors"
-	"github.com/yuuki/capdir/log"
+	"github.com/yuuki/caplize/log"
 )
 
 func main() {
@@ -66,9 +66,9 @@ func Run(args []string) int {
 }
 
 var helpText = `
-Usage: capdir [options] ORIGIN_DIR DEPLOY_DIR
+Usage: caplize [options] ORIGIN_DIR DEPLOY_DIR
 
-  capdir is a tool to make Capistrano-like directory structure.
+  caplize is a tool to make Capistrano-like directory structure.
 
 Options:
 
@@ -78,6 +78,6 @@ Options:
 
 Examples:
 
-  $ capdir --keep 5 /tmp/app /var/www/app
+  $ caplize --keep 5 /tmp/app /var/www/app
 
 `
