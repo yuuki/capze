@@ -6,8 +6,8 @@ capdir
 ## Usage
 
 ```bash
-$ capdir -o /tmp/app --keeps 5 /var/www/app
-$ tar xfp /tmp/app.tar | capdir --keeps 5 /var/www/app
+$ capdir --keeps 5 /tmp/app /var/www/app
+$ cat /tmp/app.tar | capdir --keeps 5 /var/www/app
 
 $ capdir --rollback /var/www/app
 ```
