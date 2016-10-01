@@ -31,7 +31,9 @@ func Run(args []string) int {
 	flags.IntVar(&keep, "keep", 3, "")
 	flags.IntVar(&keep, "k", 3, "")
 	flags.BoolVar(&isRollback, "rollback", false, "")
+	flags.BoolVar(&isRollback, "r", false, "")
 	flags.BoolVar(&isDebug, "debug", false, "")
+	flags.BoolVar(&isDebug, "d", false, "")
 
 	if err := flags.Parse(args[1:]); err != nil {
 		return 10
@@ -72,9 +74,11 @@ Usage: capze [options] ORIGIN_DIR DEPLOY_DIR
 
 Options:
 
-  --keep, -k           The number of releases that it keeps (optional)
+  --keep, -k           The number of releases that it keeps
 
-  --rollback, -r       Run as rollback mode (optional)
+  --rollback, -r       Run as rollback mode
+
+  --debug, -d          Run with debug print
 
 Examples:
 
