@@ -1,7 +1,7 @@
 capze
 ======
 
-`capze` is a tool to make [Capistrano](http://capistranorb.com/)-based directory structure.
+`capze` is a tool to make [Capistrano](http://capistranorb.com/)-lile directory structure.
 
 ## Usage
 
