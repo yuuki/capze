@@ -30,6 +30,7 @@ func (cli *CLI) Run(args []string) int {
 		isRollback bool
 		originDir  string
 		deployDir  string
+		version    bool
 		isDebug    bool
 	)
 
@@ -42,6 +43,8 @@ func (cli *CLI) Run(args []string) int {
 	flags.IntVar(&keep, "k", 3, "")
 	flags.BoolVar(&isRollback, "rollback", false, "")
 	flags.BoolVar(&isRollback, "r", false, "")
+	flags.BoolVar(&version, "version", false, "")
+	flags.BoolVar(&version, "v", false, "")
 	flags.BoolVar(&isDebug, "debug", false, "")
 	flags.BoolVar(&isDebug, "d", false, "")
 
@@ -50,6 +53,11 @@ func (cli *CLI) Run(args []string) int {
 	}
 
 	log.IsDebug = isDebug
+
+	if version {
+		fmt.Fprintf(cli.errStream, "%s version %s, build %s \n", Name, Version, GitCommit)
+		return 0
+	}
 
 	if isRollback {
 		// rollback mode
