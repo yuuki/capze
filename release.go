@@ -15,12 +15,12 @@ import (
 )
 
 type Release struct {
-	Timestamp	string
-	DeployDir	string
-	ReleasesDir	string
-	ReleaseDir	string
-	CurrentDir	string
-	KeepReleases	int
+	Timestamp    string
+	DeployDir    string
+	ReleasesDir  string
+	ReleaseDir   string
+	CurrentDir   string
+	KeepReleases int
 }
 
 func NewRelease(deployDir string, keep int) *Release {
@@ -36,11 +36,11 @@ func NewRelease(deployDir string, keep int) *Release {
 	releaseDir := filepath.Join(deployDir, "releases", timestamp)
 
 	r := &Release{
-		Timestamp: timestamp,
-		DeployDir: deployDir,
-		ReleasesDir: releasesDir,
-		ReleaseDir: releaseDir,
-		CurrentDir: currentDir,
+		Timestamp:    timestamp,
+		DeployDir:    deployDir,
+		ReleasesDir:  releasesDir,
+		ReleaseDir:   releaseDir,
+		CurrentDir:   currentDir,
 		KeepReleases: keep,
 	}
 	return r
@@ -170,4 +170,3 @@ func (r *Release) Rollback() error {
 
 	return nil
 }
-
