@@ -12,4 +12,8 @@ build: deps
 test:
 	go test -v .
 
+vet:
+	go vet ./...
+
+
 .PHONY: all deps build test
