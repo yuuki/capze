@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -10,12 +11,20 @@ import (
 	"github.com/yuuki/capze/log"
 )
 
+// CLI is the command line object
+type CLI struct {
+	// outStream and errStream are the stdout and stderr
+	// to write message from the CLI.
+	outStream, errStream io.Writer
+}
+
 func main() {
-	os.Exit(Run(os.Args))
+	cli := &CLI{outStream: os.Stdout, errStream: os.Stderr}
+	os.Exit(cli.Run(os.Args))
 }
 
 // Run invokes the CLI with the given arguments.
-func Run(args []string) int {
+func (cli *CLI) Run(args []string) int {
 	var (
 		keep       int
 		isRollback bool
@@ -25,8 +34,9 @@ func Run(args []string) int {
 	)
 
 	flags := flag.NewFlagSet(Name, flag.ContinueOnError)
+	flags.SetOutput(cli.errStream)
 	flags.Usage = func() {
-		fmt.Fprint(os.Stderr, helpText)
+		fmt.Fprint(cli.errStream, helpText)
 	}
 	flags.IntVar(&keep, "keep", 3, "")
 	flags.IntVar(&keep, "k", 3, "")
@@ -45,7 +55,7 @@ func Run(args []string) int {
 		// rollback mode
 		arg := flags.Args()
 		if len(arg) != 1 {
-			fmt.Fprint(os.Stderr, "Too few arguments (!=1): must specify one arguments")
+			fmt.Fprint(cli.errStream, "Too few arguments (!=1): must specify one arguments")
 			return 11
 		}
 
@@ -54,9 +64,9 @@ func Run(args []string) int {
 		release := NewRelease(deployDir, keep)
 		if err := release.Rollback(); err != nil {
 			if isDebug {
-				fmt.Fprintf(os.Stderr, "%+v\n", err)
+				fmt.Fprintf(cli.errStream, "%+v\n", err)
 			} else {
-				fmt.Fprintf(os.Stderr, "%s\n", errors.Cause(err))
+				fmt.Fprintf(cli.errStream, "%s\n", errors.Cause(err))
 			}
 			return -1
 		}
@@ -64,7 +74,7 @@ func Run(args []string) int {
 		// deploy mode
 		paths := flags.Args()
 		if len(paths) != 2 {
-			fmt.Fprint(os.Stderr, "Too few arguments (!=2): must specify two arguments")
+			fmt.Fprint(cli.errStream, "Too few arguments (!=2): must specify two arguments")
 			return 11
 		}
 
@@ -73,9 +83,9 @@ func Run(args []string) int {
 		release := NewRelease(deployDir, keep)
 		if err := release.Deploy(originDir); err != nil {
 			if isDebug {
-				fmt.Fprintf(os.Stderr, "%+v\n", err)
+				fmt.Fprintf(cli.errStream, "%+v\n", err)
 			} else {
-				fmt.Fprintf(os.Stderr, "%s\n", errors.Cause(err))
+				fmt.Fprintf(cli.errStream, "%s\n", errors.Cause(err))
 			}
 			return -1
 		}
