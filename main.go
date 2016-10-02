@@ -43,6 +43,23 @@ func Run(args []string) int {
 
 	if isRollback {
 		// rollback mode
+		arg := flags.Args()
+		if len(arg) != 1 {
+			fmt.Fprint(os.Stderr, "Too few arguments (!=1): must specify one arguments")
+			return 11
+		}
+
+		deployDir = filepath.Clean(arg[0])
+
+		release := NewRelease(deployDir, keep)
+		if err := release.Rollback(); err != nil {
+			if isDebug {
+				fmt.Fprintf(os.Stderr, "%+v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s\n", errors.Cause(err))
+			}
+			return -1
+		}
 	} else {
 		// deploy mode
 		paths := flags.Args()

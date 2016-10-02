@@ -46,6 +46,10 @@ func NewRelease(deployDir string, keep int) *Release {
 	return r
 }
 
+func (r *Release) SetReleaseDir(timestamp string) {
+	r.ReleaseDir = filepath.Join(r.DeployDir, "releases", timestamp)
+}
+
 // Deploy release
 func (r *Release) Deploy(originDir string) error {
 	if err := r.Create(originDir); err != nil {
@@ -122,6 +126,46 @@ func (r *Release) Cleanup() error {
 				return errors.Wrapf(err, "Failed to remove %s", dirsStr)
 			}
 		}
+	}
+
+	return nil
+}
+
+// Rollback to old release
+func (r *Release) Rollback() error {
+	if !osutil.ExistsDir(r.DeployDir) {
+		return errors.Errorf("No such directory: %s", r.DeployDir)
+	}
+
+	out, err := exec.Command("ls", "-1t", r.ReleasesDir).Output()
+	if err != nil {
+		return errors.Wrapf(err, "Failed to list releases %s", r.ReleasesDir)
+	}
+	timestamps := strings.Split(string(out), "\n")
+	if len(timestamps) < 2 {
+		return errors.Errorf("There are no older releases to rollback to %s", r.ReleasesDir)
+	}
+
+	index := -1
+	if v := os.Getenv("ROLLBACK_RELEASE"); v == "" {
+		index = 1
+	} else {
+		for i, t := range timestamps {
+			if v == t {
+				index = i
+				break
+			}
+		}
+		if index == -1 {
+			return errors.Errorf("Cannot rollback because release %s does not exist", v)
+		}
+	}
+
+	last := timestamps[index]
+
+	r.SetReleaseDir(last)
+	if err := r.Symlink(); err != nil {
+		return errors.Errorf("Failed to switch symlink for rollback to %s", r.ReleaseDir)
 	}
 
 	return nil
