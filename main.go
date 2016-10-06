@@ -69,7 +69,7 @@ func (cli *CLI) Run(args []string) int {
 
 		deployDir = filepath.Clean(arg[0])
 
-		release := NewRelease(deployDir, keep)
+		release := NewRelease(deployDir)
 		if err := release.Rollback(); err != nil {
 			if isDebug {
 				fmt.Fprintf(cli.errStream, "%+v\n", err)
@@ -88,8 +88,8 @@ func (cli *CLI) Run(args []string) int {
 
 		originDir, deployDir = filepath.Clean(paths[0]), filepath.Clean(paths[1])
 
-		release := NewRelease(deployDir, keep)
-		if err := release.Deploy(originDir); err != nil {
+		release := NewRelease(deployDir)
+		if err := release.Deploy(originDir, keep); err != nil {
 			if isDebug {
 				fmt.Fprintf(cli.errStream, "%+v\n", err)
 			} else {

@@ -20,10 +20,9 @@ type Release struct {
 	ReleasesDir  string
 	ReleaseDir   string
 	CurrentDir   string
-	KeepReleases int
 }
 
-func NewRelease(deployDir string, keep int) *Release {
+func NewRelease(deployDir string) *Release {
 	deployDir, _ = filepath.Abs(deployDir)
 	currentDir := filepath.Join(deployDir, "current")
 	releasesDir := filepath.Join(deployDir, "releases")
@@ -41,7 +40,6 @@ func NewRelease(deployDir string, keep int) *Release {
 		ReleasesDir:  releasesDir,
 		ReleaseDir:   releaseDir,
 		CurrentDir:   currentDir,
-		KeepReleases: keep,
 	}
 	return r
 }
@@ -51,14 +49,14 @@ func (r *Release) SetReleaseDir(timestamp string) {
 }
 
 // Deploy release
-func (r *Release) Deploy(originDir string) error {
+func (r *Release) Deploy(originDir string, keep int) error {
 	if err := r.Create(originDir); err != nil {
 		return errors.Wrap(err, "Failed to create release")
 	}
 	if err := r.Symlink(); err != nil {
 		return errors.Wrap(err, "Failed to symlink release")
 	}
-	if err := r.Cleanup(); err != nil {
+	if err := r.Cleanup(keep); err != nil {
 		return errors.Wrap(err, "Failed to cleanup release")
 	}
 	return nil
@@ -103,7 +101,7 @@ func (r *Release) Symlink() error {
 }
 
 // Clean up old releases
-func (r *Release) Cleanup() error {
+func (r *Release) Cleanup(keep int) error {
 	if !osutil.ExistsDir(r.DeployDir) {
 		return errors.Errorf("No such directory: %s", r.DeployDir)
 	}
@@ -113,8 +111,8 @@ func (r *Release) Cleanup() error {
 		return errors.Wrapf(err, "Failed to list releases %s", r.ReleasesDir)
 	}
 	timestamps := strings.Split(string(out), "\n")
-	if len(timestamps) > r.KeepReleases {
-		n := len(timestamps) - 1 - r.KeepReleases
+	if len(timestamps) > keep {
+		n := len(timestamps) - 1 - keep
 		dirs := timestamps[0:n]
 		if len(dirs) > 0 {
 			var dirsStr string
