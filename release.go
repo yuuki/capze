@@ -16,41 +16,41 @@ import (
 
 type Release struct {
 	Timestamp    string
-	DeployDir    string
-	ReleasesDir  string
-	ReleaseDir   string
-	CurrentDir   string
+	DeployPath    string
+	ReleasesPath  string
+	ReleasePath   string
+	CurrentPath   string
 }
 
-func NewRelease(deployDir string) *Release {
-	deployDir, _ = filepath.Abs(deployDir)
-	currentDir := filepath.Join(deployDir, "current")
-	releasesDir := filepath.Join(deployDir, "releases")
+func NewRelease(deployPath string) *Release {
+	deployPath, _ = filepath.Abs(deployPath)
+	currentPath := filepath.Join(deployPath, "current")
+	releasesPath := filepath.Join(deployPath, "releases")
 
 	t := time.Now()
 	utc, _ := time.LoadLocation("UTC")
 	t = t.In(utc)
 	timestamp := strftime.Format("%Y%m%d%H%M%S", t)
 
-	releaseDir := filepath.Join(deployDir, "releases", timestamp)
+	releasePath := filepath.Join(deployPath, "releases", timestamp)
 
 	r := &Release{
 		Timestamp:    timestamp,
-		DeployDir:    deployDir,
-		ReleasesDir:  releasesDir,
-		ReleaseDir:   releaseDir,
-		CurrentDir:   currentDir,
+		DeployPath:    deployPath,
+		ReleasesPath:  releasesPath,
+		ReleasePath:   releasePath,
+		CurrentPath:   currentPath,
 	}
 	return r
 }
 
-func (r *Release) SetReleaseDir(timestamp string) {
-	r.ReleaseDir = filepath.Join(r.DeployDir, "releases", timestamp)
+func (r *Release) SetReleasePath(timestamp string) {
+	r.ReleasePath = filepath.Join(r.DeployPath, "releases", timestamp)
 }
 
 // Deploy release
-func (r *Release) Deploy(originDir string, keep int) error {
-	if err := r.Create(originDir); err != nil {
+func (r *Release) Deploy(originPath string, keep int) error {
+	if err := r.Create(originPath); err != nil {
 		return errors.Wrap(err, "Failed to create release")
 	}
 	if err := r.Symlink(); err != nil {
@@ -63,52 +63,52 @@ func (r *Release) Deploy(originDir string, keep int) error {
 }
 
 // Create release directories
-func (r *Release) Create(originDir string) error {
-	for _, dir := range []string{originDir, r.DeployDir} {
+func (r *Release) Create(originPath string) error {
+	for _, dir := range []string{originPath, r.DeployPath} {
 		if !osutil.ExistsDir(dir) {
 			return errors.Errorf("No such directory: %s", dir)
 		}
 	}
-	originDir, _ = filepath.Abs(originDir)
+	originPath, _ = filepath.Abs(originPath)
 
-	if !osutil.ExistsDir(r.ReleasesDir) {
-		if err := os.MkdirAll(r.ReleasesDir, 0755); err != nil {
-			return errors.Wrapf(err, "Failed to create releases directory: %s", r.ReleasesDir)
+	if !osutil.ExistsDir(r.ReleasesPath) {
+		if err := os.MkdirAll(r.ReleasesPath, 0755); err != nil {
+			return errors.Wrapf(err, "Failed to create releases directory: %s", r.ReleasesPath)
 		}
 	}
-	if osutil.ExistsDir(r.ReleaseDir) {
-		return errors.Errorf("%s is already exists", r.ReleaseDir)
+	if osutil.ExistsDir(r.ReleasePath) {
+		return errors.Errorf("%s is already exists", r.ReleasePath)
 	}
-	if err := osutil.RunCmd("mv", originDir, r.ReleaseDir); err != nil {
-		return errors.Wrapf(err, "Failed to move %s into %s", originDir, r.ReleaseDir)
+	if err := osutil.RunCmd("mv", originPath, r.ReleasePath); err != nil {
+		return errors.Wrapf(err, "Failed to move %s into %s", originPath, r.ReleasePath)
 	}
 	return nil
 }
 
 func (r *Release) Symlink() error {
-	if !osutil.ExistsDir(r.DeployDir) {
-		return errors.Errorf("No such directory: %s", r.DeployDir)
+	if !osutil.ExistsDir(r.DeployPath) {
+		return errors.Errorf("No such directory: %s", r.DeployPath)
 	}
 
-	tmpCurrentPath := filepath.Join(r.ReleaseDir, filepath.Base(r.CurrentDir))
-	if err := osutil.Symlink(r.ReleaseDir, tmpCurrentPath); err != nil {
+	tmpCurrentPath := filepath.Join(r.ReleasePath, filepath.Base(r.CurrentPath))
+	if err := osutil.Symlink(r.ReleasePath, tmpCurrentPath); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpCurrentPath, r.CurrentDir); err != nil {
-		return errors.Wrapf(err, "Failed to switch current: %s => %s", r.ReleaseDir, r.CurrentDir)
+	if err := os.Rename(tmpCurrentPath, r.CurrentPath); err != nil {
+		return errors.Wrapf(err, "Failed to switch current: %s => %s", r.ReleasePath, r.CurrentPath)
 	}
 	return nil
 }
 
 // Clean up old releases
 func (r *Release) Cleanup(keep int) error {
-	if !osutil.ExistsDir(r.DeployDir) {
-		return errors.Errorf("No such directory: %s", r.DeployDir)
+	if !osutil.ExistsDir(r.DeployPath) {
+		return errors.Errorf("No such directory: %s", r.DeployPath)
 	}
 
-	out, err := exec.Command("ls", "-1tr", r.ReleasesDir).Output()
+	out, err := exec.Command("ls", "-1tr", r.ReleasesPath).Output()
 	if err != nil {
-		return errors.Wrapf(err, "Failed to list releases %s", r.ReleasesDir)
+		return errors.Wrapf(err, "Failed to list releases %s", r.ReleasesPath)
 	}
 	timestamps := strings.Split(string(out), "\n")
 	if len(timestamps) > keep {
@@ -117,7 +117,7 @@ func (r *Release) Cleanup(keep int) error {
 		if len(dirs) > 0 {
 			var dirsStr string
 			for _, dir := range dirs {
-				dirsStr = strings.Join([]string{dirsStr, filepath.Join(r.ReleasesDir, dir)}, " ")
+				dirsStr = strings.Join([]string{dirsStr, filepath.Join(r.ReleasesPath, dir)}, " ")
 			}
 			rmCmd := fmt.Sprintf("rm -fr %s", dirsStr)
 			if err := osutil.RunCmd("/bin/bash", "-c", rmCmd); err != nil {
@@ -131,17 +131,17 @@ func (r *Release) Cleanup(keep int) error {
 
 // Rollback to old release
 func (r *Release) Rollback() error {
-	if !osutil.ExistsDir(r.DeployDir) {
-		return errors.Errorf("No such directory: %s", r.DeployDir)
+	if !osutil.ExistsDir(r.DeployPath) {
+		return errors.Errorf("No such directory: %s", r.DeployPath)
 	}
 
-	out, err := exec.Command("ls", "-1t", r.ReleasesDir).Output()
+	out, err := exec.Command("ls", "-1t", r.ReleasesPath).Output()
 	if err != nil {
-		return errors.Wrapf(err, "Failed to list releases %s", r.ReleasesDir)
+		return errors.Wrapf(err, "Failed to list releases %s", r.ReleasesPath)
 	}
 	timestamps := strings.Split(string(out), "\n")
 	if len(timestamps) < 2 {
-		return errors.Errorf("There are no older releases to rollback to %s", r.ReleasesDir)
+		return errors.Errorf("There are no older releases to rollback to %s", r.ReleasesPath)
 	}
 
 	index := -1
@@ -161,9 +161,9 @@ func (r *Release) Rollback() error {
 
 	last := timestamps[index]
 
-	r.SetReleaseDir(last)
+	r.SetReleasePath(last)
 	if err := r.Symlink(); err != nil {
-		return errors.Errorf("Failed to switch symlink for rollback to %s", r.ReleaseDir)
+		return errors.Errorf("Failed to switch symlink for rollback to %s", r.ReleasePath)
 	}
 
 	return nil
