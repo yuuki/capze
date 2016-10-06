@@ -18,7 +18,7 @@ $ tree -L 2 /var/www/app
 ## Usage
 
 ```bash
-$ capze --keeps 5 /tmp/app /var/www/app
+$ capze --keep 5 /tmp/app /var/www/app
 
 $ capze --rollback /var/www/app
 ```
@@ -27,5 +27,5 @@ You can use `capze` in combination with [Droot](https://github.com/yuuki/droot).
 
 ```bash
 $ aws s3 cp s3://drootexamples/app.tar.gz - | tar xz -C /tmp/app
-$ capze --keeps 5 /tmp/app /var/www/app
+$ capze --keep 5 /tmp/app /var/www/app
 ```
