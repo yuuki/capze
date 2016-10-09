@@ -24,4 +24,4 @@ minor: gobump
 gobump:
 	go get github.com/motemen/gobump/cmd/gobump
 
-.PHONY: all deps build test
+.PHONY: all deps build test vet patch minor gobump
