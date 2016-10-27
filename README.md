@@ -1,7 +1,7 @@
 capze
 ======
 
-`capze` is a tool to make [Capistrano](http://capistranorb.com/)-lile directory structure.
+`capze` is a tool to make [Capistrano](http://capistranorb.com/)-like directory structure.
 
 ```bash
 $ tree -L 2 /var/www/app
