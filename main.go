@@ -28,8 +28,8 @@ func (cli *CLI) Run(args []string) int {
 	var (
 		keep       int
 		isRollback bool
-		originPath  string
-		deployPath  string
+		originPath string
+		deployPath string
 		version    bool
 		isDebug    bool
 	)

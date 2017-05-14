@@ -16,10 +16,10 @@ import (
 
 type Release struct {
 	Timestamp    string
-	DeployPath    string
-	ReleasesPath  string
-	ReleasePath   string
-	CurrentPath   string
+	DeployPath   string
+	ReleasesPath string
+	ReleasePath  string
+	CurrentPath  string
 }
 
 func NewRelease(deployPath string) *Release {
@@ -36,10 +36,10 @@ func NewRelease(deployPath string) *Release {
 
 	r := &Release{
 		Timestamp:    timestamp,
-		DeployPath:    deployPath,
-		ReleasesPath:  releasesPath,
-		ReleasePath:   releasePath,
-		CurrentPath:   currentPath,
+		DeployPath:   deployPath,
+		ReleasesPath: releasesPath,
+		ReleasePath:  releasePath,
+		CurrentPath:  currentPath,
 	}
 	return r
 }
