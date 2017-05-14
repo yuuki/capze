@@ -1,0 +1,13 @@
+memo = "aaf04fd9e7e8a732753c6d0a480ef7ec27d03c65daf61af89719522411a0342d"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/jehiah/go-strftime"
+  packages = ["."]
+  revision = "2efbe75097a505e2789f7e39cb9da067b5be8e3e"
+
+[[projects]]
+  name = "github.com/pkg/errors"
+  packages = ["."]
+  revision = "3866ebc348c54054262feae422da428fe6cf147d"
+  version = "v0.8.0"
