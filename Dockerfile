@@ -1,4 +1,4 @@
-FROM golang:1.7.1
+FROM golang:1.8.1
 
 RUN go get github.com/laher/goxc
 
