@@ -29,3 +29,6 @@ You can use `capze` in combination with [Droot](https://github.com/yuuki/droot).
 $ aws s3 cp s3://drootexamples/app.tar.gz - | tar xz -C /tmp/app
 $ capze --keep 5 /tmp/app /var/www/app
 ```
+
+## License
+MIT
