@@ -30,6 +30,7 @@ func (cli *CLI) Run(args []string) int {
 		isRollback bool
 		originPath string
 		deployPath string
+		prunedDirs bool
 		version    bool
 		isDebug    bool
 	)
@@ -43,6 +44,7 @@ func (cli *CLI) Run(args []string) int {
 	flags.IntVar(&keep, "k", 3, "")
 	flags.BoolVar(&isRollback, "rollback", false, "")
 	flags.BoolVar(&isRollback, "r", false, "")
+	flags.BoolVar(&prunedDirs, "pruned-dirs", false, "")
 	flags.BoolVar(&version, "version", false, "")
 	flags.BoolVar(&version, "v", false, "")
 	flags.BoolVar(&isDebug, "debug", false, "")
@@ -59,7 +61,29 @@ func (cli *CLI) Run(args []string) int {
 		return 0
 	}
 
-	if isRollback {
+	if prunedDirs {
+		// show pruned directories mode
+		arg := flags.Args()
+		if len(arg) < 1 {
+			fmt.Fprintf(cli.errStream, "Too few arguments (%d!=1): must specify one arguments", len(arg))
+			return 11
+		}
+
+		deployPath = filepath.Clean(arg[0])
+
+		release := NewRelease(deployPath)
+		dirs, err := release.PrunedDirs(keep)
+		if err != nil {
+			if isDebug {
+				fmt.Fprintf(cli.errStream, "%+v\n", err)
+			} else {
+				fmt.Fprintf(cli.errStream, "%s\n", errors.Cause(err))
+			}
+		}
+		for _, dir := range dirs {
+			fmt.Printf("%v\n", dir)
+		}
+	} else if isRollback {
 		// rollback mode
 		arg := flags.Args()
 		if len(arg) != 1 {
@@ -113,10 +137,14 @@ Options:
 
   --rollback, -r       Run as rollback mode
 
+  --pruned-dirs        Show directories pruned (Optional)
+
   --debug, -d          Run with debug print
 
 Examples:
 
   $ capze --keep 5 /tmp/app /var/www/app
+
+  $ capze --keep 5 --pruned-dirs /var/www/app
 
 `
