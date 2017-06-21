@@ -106,23 +106,19 @@ func (r *Release) Cleanup(keep int) error {
 		return errors.Errorf("No such directory: %s", r.DeployPath)
 	}
 
-	out, err := exec.Command("ls", "-1tr", r.ReleasesPath).Output()
+	dirs, err := r.findPrunedDirs(keep)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to list releases %s", r.ReleasesPath)
+		return err
 	}
-	timestamps := strings.Split(string(out), "\n")
-	if len(timestamps) > keep {
-		n := len(timestamps) - 1 - keep
-		dirs := timestamps[0:n]
-		if len(dirs) > 0 {
-			var dirsStr string
-			for _, dir := range dirs {
-				dirsStr = strings.Join([]string{dirsStr, filepath.Join(r.ReleasesPath, dir)}, " ")
-			}
-			rmCmd := fmt.Sprintf("rm -fr %s", dirsStr)
-			if err := osutil.RunCmd("/bin/bash", "-c", rmCmd); err != nil {
-				return errors.Wrapf(err, "Failed to remove %s", dirsStr)
-			}
+
+	if len(dirs) > 0 {
+		var dirsStr string
+		for _, dir := range dirs {
+			dirsStr = strings.Join([]string{dirsStr, filepath.Join(r.ReleasesPath, dir)}, " ")
+		}
+		rmCmd := fmt.Sprintf("rm -fr %s", dirsStr)
+		if err := osutil.RunCmd("/bin/bash", "-c", rmCmd); err != nil {
+			return errors.Wrapf(err, "Failed to remove %s", dirsStr)
 		}
 	}
 
@@ -174,7 +170,10 @@ func (r *Release) PrunedDirs(keep int) ([]string, error) {
 	if !osutil.ExistsDir(r.DeployPath) {
 		return []string{}, errors.Errorf("No such directory: %s", r.DeployPath)
 	}
+	return r.findPrunedDirs(keep)
+}
 
+func (r *Release) findPrunedDirs(keep int) ([]string, error) {
 	out, err := exec.Command("ls", "-1tr", r.ReleasesPath).Output()
 	if err != nil {
 		return []string{}, errors.Wrapf(err, "Failed to list releases %s", r.ReleasesPath)
