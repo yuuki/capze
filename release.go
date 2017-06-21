@@ -168,3 +168,26 @@ func (r *Release) Rollback() error {
 
 	return nil
 }
+
+// PrunedDirs returns the string slice of directories that it will be pruned.
+func (r *Release) PrunedDirs(keep int) ([]string, error) {
+	if !osutil.ExistsDir(r.DeployPath) {
+		return []string{}, errors.Errorf("No such directory: %s", r.DeployPath)
+	}
+
+	out, err := exec.Command("ls", "-1tr", r.ReleasesPath).Output()
+	if err != nil {
+		return []string{}, errors.Wrapf(err, "Failed to list releases %s", r.ReleasesPath)
+	}
+	timestamps := strings.Split(string(out), "\n")
+	if len(timestamps) > keep {
+		n := len(timestamps) - 1 - keep
+		dirs := make([]string, 0, n)
+		for _, ts := range timestamps[0:n] {
+			dirs = append(dirs, filepath.Join(r.ReleasesPath, ts))
+		}
+		return dirs, nil
+	}
+
+	return []string{}, nil
+}
