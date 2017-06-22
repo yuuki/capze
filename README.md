@@ -21,12 +21,16 @@ $ tree -L 2 /var/www/app
 $ capze --keep 5 /tmp/app /var/www/app
 
 $ capze --rollback /var/www/app
+
+$ capze --pruned-dirs --keep 1 /var/www/app
+/var/www/app/releases/20161006002523
+/var/www/app/releases/20170621124528
 ```
 
 You can use `capze` in combination with [Droot](https://github.com/yuuki/droot).
 
 ```bash
-$ aws s3 cp s3://drootexamples/app.tar.gz - | tar xz -C /tmp/app
+$ aws s3 cp s3://drootexamples/app.tar.gz - | tar xzf - -C /tmp/app
 $ capze --keep 5 /tmp/app /var/www/app
 ```
 
