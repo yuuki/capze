@@ -9,6 +9,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/yuuki/capze/log"
+	"github.com/yuuki/capze/release"
 )
 
 // CLI is the command line object
@@ -71,8 +72,8 @@ func (cli *CLI) Run(args []string) int {
 
 		deployPath = filepath.Clean(arg[0])
 
-		release := NewRelease(deployPath)
-		dirs, err := release.PrunedDirs(keep)
+		r := release.NewRelease(deployPath)
+		dirs, err := r.PrunedDirs(keep)
 		if err != nil {
 			if isDebug {
 				fmt.Fprintf(cli.errStream, "%+v\n", err)
@@ -93,8 +94,8 @@ func (cli *CLI) Run(args []string) int {
 
 		deployPath = filepath.Clean(arg[0])
 
-		release := NewRelease(deployPath)
-		if err := release.Rollback(); err != nil {
+		r := release.NewRelease(deployPath)
+		if err := r.Rollback(); err != nil {
 			if isDebug {
 				fmt.Fprintf(cli.errStream, "%+v\n", err)
 			} else {
@@ -112,8 +113,8 @@ func (cli *CLI) Run(args []string) int {
 
 		originPath, deployPath = filepath.Clean(paths[0]), filepath.Clean(paths[1])
 
-		release := NewRelease(deployPath)
-		if err := release.Deploy(originPath, keep); err != nil {
+		r := release.NewRelease(deployPath)
+		if err := r.Deploy(originPath, keep); err != nil {
 			if isDebug {
 				fmt.Fprintf(cli.errStream, "%+v\n", err)
 			} else {
