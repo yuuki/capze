@@ -120,6 +120,7 @@ func (r *Release) Cleanup(keep int) error {
 		if err := osutil.RunCmd("/bin/bash", "-c", rmCmd); err != nil {
 			return errors.Wrapf(err, "Failed to remove %s", dirsStr)
 		}
+		fmt.Printf("deleted: %s\n", dirsStr)
 	}
 
 	return nil
