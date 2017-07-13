@@ -1,0 +1,7 @@
+[[constraint]]
+  branch = "master"
+  name = "github.com/jehiah/go-strftime"
+
+[[constraint]]
+  name = "github.com/pkg/errors"
+  version = "v0.8.0"
