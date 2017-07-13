@@ -114,7 +114,7 @@ func (r *Release) Cleanup(keep int) error {
 	if len(dirs) > 0 {
 		var dirsStr string
 		for _, dir := range dirs {
-			dirsStr = strings.Join([]string{dirsStr, filepath.Join(r.ReleasesPath, dir)}, " ")
+			dirsStr = strings.Join([]string{dirsStr, dir}, " ")
 		}
 		rmCmd := fmt.Sprintf("rm -fr %s", dirsStr)
 		if err := osutil.RunCmd("/bin/bash", "-c", rmCmd); err != nil {
