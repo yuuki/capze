@@ -49,15 +49,17 @@ func (r *Release) SetReleasePath(timestamp string) {
 }
 
 // Deploy release
-func (r *Release) Deploy(originPath string, keep int) error {
+func (r *Release) Deploy(originPath string, keep int, prune bool) error {
 	if err := r.Create(originPath); err != nil {
 		return errors.Wrap(err, "Failed to create release")
 	}
 	if err := r.Symlink(); err != nil {
 		return errors.Wrap(err, "Failed to symlink release")
 	}
-	if err := r.Cleanup(keep); err != nil {
-		return errors.Wrap(err, "Failed to cleanup release")
+	if prune {
+		if err := r.Cleanup(keep); err != nil {
+			return errors.Wrap(err, "Failed to cleanup release")
+		}
 	}
 	return nil
 }
