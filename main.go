@@ -32,6 +32,7 @@ func (cli *CLI) Run(args []string) int {
 		originPath string
 		deployPath string
 		prunedDirs bool
+		prune      bool
 		skipPrune  bool
 		version    bool
 		isDebug    bool
@@ -47,6 +48,7 @@ func (cli *CLI) Run(args []string) int {
 	flags.BoolVar(&isRollback, "rollback", false, "")
 	flags.BoolVar(&isRollback, "r", false, "")
 	flags.BoolVar(&prunedDirs, "pruned-dirs", false, "")
+	flags.BoolVar(&prune, "prune", false, "")
 	flags.BoolVar(&skipPrune, "skip-prune", false, "")
 	flags.BoolVar(&version, "version", false, "")
 	flags.BoolVar(&version, "v", false, "")
@@ -85,6 +87,24 @@ func (cli *CLI) Run(args []string) int {
 		}
 		for _, dir := range dirs {
 			fmt.Printf("%v\n", dir)
+		}
+	} else if prune {
+		arg := flags.Args()
+		if len(arg) < 1 {
+			fmt.Fprintf(cli.errStream, "Too few arguments (%d!=1): must specify one arguments", len(arg))
+			return 11
+		}
+
+		deployPath = filepath.Clean(arg[0])
+
+		r := release.NewRelease(deployPath)
+		if err := r.Cleanup(keep); err != nil {
+			if isDebug {
+				fmt.Fprintf(cli.errStream, "%+v\n", err)
+			} else {
+				fmt.Fprintf(cli.errStream, "%s\n", errors.Cause(err))
+			}
+			return -1
 		}
 	} else if isRollback {
 		// rollback mode
@@ -141,6 +161,8 @@ Options:
   --rollback, -r       Run as rollback mode
 
   --pruned-dirs        Show directories pruned (Optional)
+
+  --prune              Just cleanup old directories
 
   --skip-prune         Do not cleanup old directories (the --keep option is ignored)
 
