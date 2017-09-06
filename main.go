@@ -157,15 +157,10 @@ Usage: capze [options] ORIGIN_DIR DEPLOY_DIR
 Options:
 
   --keep, -k           The number of releases that it keeps
-
   --rollback, -r       Run as rollback mode
-
-  --pruned-dirs        Show directories pruned (Optional)
-
+  --pruned-dirs        Show directories pruned
   --prune              Just cleanup old directories
-
   --skip-prune         Do not cleanup old directories (the --keep option is ignored)
-
   --debug, -d          Run with debug print
 
 Examples:
@@ -174,4 +169,7 @@ Examples:
 
   $ capze --keep 5 --pruned-dirs /var/www/app
 
+  $ capze --keep 5 --prune /var/www/app
+
+  $ capze --skip-prune /tmp/app /var/www/app
 `
