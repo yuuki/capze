@@ -150,7 +150,7 @@ func (cli *CLI) Run(args []string) int {
 }
 
 var helpText = `
-Usage: capze [options] ORIGIN_DIR DEPLOY_DIR
+Usage: capze [options] [ORIGIN_DIR] DEPLOY_DIR
 
   capze is a tool to make Capistrano-like directory structure.
 
