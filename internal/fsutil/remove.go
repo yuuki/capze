@@ -79,10 +79,10 @@ type remover struct {
 // process.
 const maxOpenDepth = 128
 
-// maxPasses is the number of times a remover reads a directory again to
-// find entries it was not given. Past that, something else is creating
-// files in the directory, and removing the directory tells so (ENOTEMPTY)
-// instead of running after it for ever.
+// maxPasses is the number of times a remover reads a directory to find
+// entries it was not given the time before. Past that, something else is
+// creating files in the directory, and removing the directory tells so
+// (ENOTEMPTY) instead of running after it for ever.
 const maxPasses = 4
 
 // An entry is a file of the tree. Its path is only needed for an error: a
@@ -215,14 +215,46 @@ func (r *remover) hoist(dir int, e *entry, name string) error {
 
 // removeEntries removes every entry of the open directory f, whose file
 // descriptor is fd and whose entry is dir.
+//
+// Something else may create files in the directory meanwhile, faster than
+// they are removed: reading the directory would then never end. So each pass
+// first counts the entries, which is quick, and then removes no more than it
+// counted. Reading a directory while removing its entries may also skip some
+// of them on some file systems, so the directory is read again as long as
+// something was removed, a few times. When nothing was, the directory is
+// empty, or lists entries that are not there; after a few passes, something
+// else fills it. Removing the directory tells both (ENOTEMPTY).
 func (r *remover) removeEntries(f *os.File, fd int, dir *entry, depth int) error {
+	readError := func(err error) error {
+		// Reading a directory may open a file too (macOS does).
+		if errors.Is(err, unix.EMFILE) || errors.Is(err, unix.ENFILE) {
+			return errTooDeep
+		}
+		return &os.PathError{Op: "read", Path: dir.path(), Err: err}
+	}
 	for pass := 1; ; pass++ {
-		count := 0
+		budget := 0
 		for {
+			names, err := f.Readdirnames(removeBatch)
+			budget += len(names)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return readError(err)
+			}
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return readError(err)
+		}
+
+		seen, count := 0, 0
+		for seen < budget {
 			if err := r.ctx.Err(); err != nil {
 				return err
 			}
-			entries, err := f.ReadDir(removeBatch)
+			entries, err := f.ReadDir(min(removeBatch, budget-seen))
+			seen += len(entries)
 			for _, de := range entries {
 				e := &entry{parent: dir, name: de.Name()}
 				var removed bool
@@ -249,24 +281,15 @@ func (r *remover) removeEntries(f *os.File, fd int, dir *entry, depth int) error
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			// Reading a directory may open a file too (macOS does).
-			if errors.Is(err, unix.EMFILE) || errors.Is(err, unix.ENFILE) {
-				return errTooDeep
-			}
 			if err != nil {
-				return &os.PathError{Op: "read", Path: dir.path(), Err: err}
+				return readError(err)
 			}
 		}
-		// Reading a directory while removing its entries may skip some of
-		// them on some file systems: read it again as long as something was
-		// removed, a few times. When nothing was, the directory is empty, or
-		// lists entries that are not there; after a few times, something
-		// else fills it. Removing the directory tells both.
 		if count == 0 || pass == maxPasses {
 			return nil
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return &os.PathError{Op: "read", Path: dir.path(), Err: err}
+			return readError(err)
 		}
 	}
 }
