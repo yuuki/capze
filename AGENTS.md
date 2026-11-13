@@ -3,11 +3,14 @@
 ## Rules
 - `docs/design.md` is the source of truth for the behaviour and its reasons: read the section of what you change first, and update it with the change.
 - A release enters and leaves `releases` by one `rename(2)`; capze never copies a release, and never deletes a file below `releases`: it renames the release to `.capze/trash` first.
-- `current` changes only in `switchTo` (a link created aside, then renamed over it); a failed `deploy` or `rollback` leaves it on the old release.
+- `current` changes only in `commitSwitch` (a link created aside by `prepareSwitch`, then renamed over it); a failed `deploy` or `rollback` leaves it on the old release.
 - Delete only with `fsutil.RemoveTree`, never `os.RemoveAll`: it must not cross a mount point (mount IDs, not device numbers), follow a symbolic link, or change a directory outside the tree.
 - The order of the release names is the only record of the history: no state file, no file written into a release; a new name sorts after every existing one (`nextID`).
 - Never delete or switch to something capze did not create: only directories of `releases` named `YYYYMMDDhhmmss` are releases.
-- Pruning never deletes the current release or a newer one, and a pruning failure never fails `capze deploy` (it warns); `capze prune` reports it with status 1.
+- Pruning never deletes the current release or a newer one, deletes nothing when `current` exists but leads to no release, and leaves a release with a mount below it whole; a pruning failure never fails `capze deploy` (it warns), `capze prune` reports it with status 1.
+- A failed `deploy` leaves the source, the releases and `current` as they were: the source moves first, and what was moved is moved back if a later step fails.
+- Compare files (`os.SameFile`), not path strings, to tell whether a path is in the deploy directory or which release `current` leads to.
+- Messages go through `printable`: a file name of a release must not forge a line of output.
 - `deploy`, `rollback` and `prune` hold the lock from their first read of `releases` to their last change; `list` and `prune --dry-run` take no lock and create nothing.
 - Tests that mount file systems mount only directories of their own `t.TempDir`, and register the unmount after it: a removal through the mount must have nothing else to delete.
 - Dependencies: `golang.org/x/sys` only; a new one needs a strong reason.

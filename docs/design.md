@@ -48,8 +48,9 @@ it.
 ### A release is moved into place, never copied
 
 `capze deploy` renames the source directory to `releases/NAME`. The source
-must therefore be on the file system of the deploy directory; otherwise the
-command fails before changing anything, and says so.
+must therefore be on the file system of the deploy directory, and on the
+same mount of it; otherwise the command fails before changing anything, and
+says so.
 
 A copy would make `releases` hold a partial release for the time of the copy
 and after a crash, and it would have to reproduce owners, modes, setuid bits,
@@ -75,6 +76,10 @@ empty path: `filepath.Abs("")` is the working directory, which an unset
 shell variable must not turn into the deploy directory. And a path with a
 `..` after a symbolic link: `filepath.Abs` removes the `..` with the link,
 while the kernel follows the link first.
+
+`releases` and `.capze/trash` must be on one file system, or no release
+could be discarded or deleted: a deployment checks it before it changes
+anything.
 
 ### Release names are deployment times that always increase
 
@@ -105,12 +110,16 @@ at every instant `current` leads to the old release or to the new one. The
 target is the relative path `releases/NAME`, so that the deploy directory
 can be moved, or seen under another path (a bind mount, a chroot).
 
-capze finds the current release by resolving the link, not by parsing it:
-the current release is the entry of `releases` that `current` ends in. A
-link made by hand or by capze 0.2, absolute or through another link, is
-understood, and so is a link to a directory inside a release: that release
-is in use, and pruning must not delete it. A `current` that is not a
-symbolic link is an error before anything changes.
+capze finds the current release by resolving the link and comparing files,
+not paths: the current release is the entry of `releases` that `current`
+ends in. A link made by hand or by capze 0.2, absolute, through another
+link or through another path to the deploy directory, is understood, and so
+is a link to a directory inside a release: that release is in use, and
+pruning must not delete it.
+
+A `current` that is not a symbolic link is an error before anything
+changes. A link that leads elsewhere, or nowhere, does not stop a
+deployment, which replaces it, but it stops pruning: see below.
 
 ### The history is linear
 
@@ -136,6 +145,13 @@ read from the directory at any time, also after `current` was changed by
 hand. A release that was moved into `releases` by a deployment that crashed
 before the switch is in the same state, and is discarded the same way.
 
+A deployment either does all of this or none of it. The source is moved
+first, because that is the step that can fail for reasons no check sees (the
+source is a mount point, or is reached through another mount of the same
+file system). If a rolled-back release then cannot be discarded, the
+releases already discarded and the source are moved back, and the
+deployment fails with everything where it was.
+
 Alternatives considered: a journal of the switches (state that can disagree
 with the directory, and cannot be repaired with `ls`), a marker file in the
 bad release (capze would write into the content it deploys), and leaving the
@@ -150,10 +166,16 @@ in the trash, where the next pruning deletes it. With capze 0.2, `rm -fr` in
 
 `.capze/trash` has mode 0700. A release may have been protected by the
 permissions of `releases` or of the release directory; in the trash, its
-setuid programs must not become reachable by other users.
+setuid programs must not become reachable by other users. The trash is
+created by the first deployment, with the link of the switch, before
+anything changes: on a full file system, the deployment fails before it
+moves the source, and the pruning that frees space does not have to create
+a directory.
 
 `capze prune --dry-run` lists the releases to delete and the entries of the
-trash, so that a script can prepare them (unmount) before the real run.
+trash, so that a script can prepare them (unmount) before the real run. It
+therefore needs to read the trash, like `capze prune`: it is for the user
+who prunes.
 
 ### Nothing is deleted through a mount point
 
@@ -179,6 +201,21 @@ after the check cannot be entered.
 The deletion stops at the first error. The release is in the trash already,
 so nothing depends on how much of it is left.
 
+Stopping there is not enough for a release that is in use: a part of the
+file system of a running container would be deleted before the mount point
+is met. So before pruning touches a release, or an entry of the trash, it
+looks for mount points below it in `/proc/self/mountinfo` (Linux), and
+leaves it whole, with the same error, if there is one. This look is a
+courtesy, not the guarantee: a mount made after it, or a system where the
+list cannot be read, is still stopped by the check on every directory.
+
+Known limits. `RemoveTree` keeps one directory open per level of the tree,
+so a tree deeper than the limit of open files of the process is not deleted
+(it stays in the trash, and pruning reports it each time). A release that
+its owner may not read or write is still deleted by its owner: the
+permissions of its directories are given back first, never those of a
+symbolic link's target or of a mount point.
+
 ### Pruning counts back from the current release
 
 `--keep N` keeps the current release and the N-1 releases before it.
@@ -186,13 +223,19 @@ Normally these are the N newest releases. After a rollback they are the
 releases that a further rollback can reach; counting from the newest release
 would delete them, and capze 0.2 could delete the current release itself.
 Releases newer than `current` are never pruned (see the linear history).
-Without a current release, the N newest are kept.
+Without a `current` link, the N newest are kept.
+
+If `current` exists but does not lead to a release (a link to a release
+deleted by hand, or to another directory), capze does not know which release
+is in use. Pruning then deletes nothing and fails: unknown is not the same
+as none, and the N newest releases may not include the one in use.
 
 ### A deployment succeeds when `current` is switched
 
 `capze deploy` exits with 0 once `current` points to the new release, even
-if deleting the old releases then fails. It warns on the standard error, and
-the next deployment or `capze prune` tries again.
+if deleting the old releases then fails, or if the switch could not be
+flushed to disk. It warns on the standard error, and the next deployment or
+`capze prune` tries the deletion again.
 
 The caller's next step is the same in both cases: restart the service. With
 a non-zero status, `capze deploy ... && systemctl restart app` would leave
@@ -209,7 +252,8 @@ rename, then the deploy directory after the switch. A crash shortly after a
 deployment must not leave `current` on a release whose files were still in
 the page cache (empty files on ext4). `--no-sync` skips the first, slow
 step for callers that do not need it. The flush runs before the lock is
-taken: it is the only step that can take long.
+taken: it is the only step that can take long. On macOS, `sync(2)` only
+schedules the writes, so the guarantee is weaker there.
 
 ### One lock per deploy directory
 
@@ -219,8 +263,8 @@ choose the same name or delete what the other is switching to. A command
 waits for the lock, and says so; it does not fail, because a deployment that
 overlaps a scheduled `prune` is normal. The kernel releases the lock when
 the process ends, so a lock is never stale. `list` and `prune --dry-run`
-take no lock and create nothing: they must work for a user who may only
-read.
+take no lock and create nothing; `list` works for a user who may only read
+the deploy directory.
 
 ### Interruption
 
@@ -241,6 +285,9 @@ ends the process as usual.
 - The standard output carries only the result, one path or name per line,
   for scripts. Everything else goes to the standard error.
 - Exit status 2 means that nothing was done.
+- Messages may name files of a release, whose names are anything: control
+  characters are escaped, so that a file name cannot forge a line of capze
+  or send an escape sequence to the terminal.
 - The only dependency is `golang.org/x/sys`. The command line uses the
   standard `flag` package.
 

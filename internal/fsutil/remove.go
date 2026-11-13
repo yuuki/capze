@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// A MountPointError reports that RemoveTree stopped at a mount point.
+// A MountPointError reports a mount point where a removal stopped.
 type MountPointError struct {
 	Path string
 }
@@ -35,6 +35,9 @@ const removeBatch = 1024
 // RemoveTree stops at the first error, and when ctx is done: what it leaves
 // can be removed later. Like os.RemoveAll, it does not follow symbolic links,
 // and it returns nil if dir does not exist.
+//
+// It keeps one directory open for each level of the tree: a tree deeper than
+// the limit of open files of the process is not removed.
 func RemoveTree(ctx context.Context, dir string) error {
 	dir = filepath.Clean(dir)
 	parent, name := filepath.Dir(dir), filepath.Base(dir)
@@ -56,7 +59,8 @@ func RemoveTree(ctx context.Context, dir string) error {
 		return fmt.Errorf("cannot tell the mount point of %s: %w", parent, err)
 	}
 	r := remover{ctx: ctx, mount: mount}
-	return r.removeDir(pfd, name, dir, false)
+	_, err = r.removeDir(pfd, &entry{name: dir}, name, false)
+	return err
 }
 
 // A remover removes the files of one mount.
@@ -67,21 +71,62 @@ type remover struct {
 	mount uint64
 }
 
-// removeDir removes the directory name of the open directory parent, and
-// everything below it. path is its path, for error messages. inTree tells
-// whether parent is itself part of the tree to remove.
-func (r *remover) removeDir(parent int, name, path string, inTree bool) error {
-	if err := r.ctx.Err(); err != nil {
-		return err
+// An entry is a file of the tree. Its path is only needed for an error: a
+// path kept for each level of a deep tree would take memory in proportion to
+// the square of the depth.
+type entry struct {
+	parent *entry
+	// name is the name of the file in its directory; for the root of the
+	// tree, its path.
+	name string
+}
+
+func (e *entry) path() string {
+	var names []string
+	for ; e.parent != nil; e = e.parent {
+		names = append(names, e.name)
 	}
-	fd, err := retry(func() (int, error) {
-		return unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	})
+	path := e.name
+	for i := len(names) - 1; i >= 0; i-- {
+		path += string(filepath.Separator) + names[i]
+	}
+	return path
+}
+
+// removeDir removes the directory e, the entry name of the open directory
+// parent, and everything below it. inTree tells whether parent is itself part
+// of the tree to remove. removed tells whether the directory was there to
+// remove.
+func (r *remover) removeDir(parent int, e *entry, name string, inTree bool) (removed bool, err error) {
+	if err := r.ctx.Err(); err != nil {
+		return false, err
+	}
+	open := func() (int, error) {
+		return retry(func() (int, error) {
+			return unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		})
+	}
+	fd, err := open()
+	if errors.Is(err, unix.EACCES) {
+		// A directory that its owner may not read, which root never meets.
+		// An empty one can be removed as it is; otherwise its owner gives
+		// the permissions back first, unless it is a mount point.
+		if removed, err := r.unlink(parent, e, name, unix.AT_REMOVEDIR, inTree); err == nil {
+			return removed, nil
+		}
+		if err := makeAccessible(parent, name, r.mount); err != nil {
+			if errors.Is(err, errOtherMount) {
+				return false, &MountPointError{Path: e.path()}
+			}
+			return false, &os.PathError{Op: "open", Path: e.path(), Err: unix.EACCES}
+		}
+		fd, err = open()
+	}
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
-			return nil
+			return false, nil
 		}
-		return &os.PathError{Op: "open", Path: path, Err: err}
+		return false, &os.PathError{Op: "open", Path: e.path(), Err: err}
 	}
 	// The mount is that of the directory that is open: a file system mounted
 	// here later hides the directory but does not change what fd reads, and
@@ -89,66 +134,77 @@ func (r *remover) removeDir(parent int, name, path string, inTree bool) error {
 	mount, err := mountOf(fd)
 	if err != nil {
 		_ = unix.Close(fd)
-		return fmt.Errorf("cannot tell the mount point of %s: %w", path, err)
+		return false, fmt.Errorf("cannot tell the mount point of %s: %w", e.path(), err)
 	}
 	if mount != r.mount {
 		_ = unix.Close(fd)
-		return &MountPointError{Path: path}
+		return false, &MountPointError{Path: e.path()}
 	}
-	f := os.NewFile(uintptr(fd), path) // f owns fd from here
-	err = r.removeEntries(f, fd, path)
+	f := os.NewFile(uintptr(fd), name) // f owns fd from here
+	err = r.removeEntries(f, fd, e)
 	_ = f.Close()
 	if err != nil {
-		return err
+		return false, err
 	}
-	return r.unlink(parent, name, unix.AT_REMOVEDIR, path, inTree)
+	return r.unlink(parent, e, name, unix.AT_REMOVEDIR, inTree)
 }
 
 // removeEntries removes every entry of the open directory f, whose file
-// descriptor is fd.
-func (r *remover) removeEntries(f *os.File, fd int, path string) error {
+// descriptor is fd and whose entry is dir.
+func (r *remover) removeEntries(f *os.File, fd int, dir *entry) error {
 	for {
-		removed := 0
+		count := 0
 		for {
+			if err := r.ctx.Err(); err != nil {
+				return err
+			}
 			entries, err := f.ReadDir(removeBatch)
-			for _, e := range entries {
-				child := filepath.Join(path, e.Name())
-				if e.IsDir() {
-					if err := r.removeDir(fd, e.Name(), child, true); err != nil {
-						return err
-					}
-				} else if err := r.unlink(fd, e.Name(), 0, child, true); err != nil {
+			for _, de := range entries {
+				e := &entry{parent: dir, name: de.Name()}
+				var removed bool
+				var err error
+				if de.IsDir() {
+					removed, err = r.removeDir(fd, e, e.name, true)
+				} else {
+					removed, err = r.unlink(fd, e, e.name, 0, true)
+				}
+				if err != nil {
 					return err
 				}
-				removed++
+				if removed {
+					count++
+				}
 			}
 			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {
-				return err
+				return &os.PathError{Op: "read", Path: dir.path(), Err: err}
 			}
 		}
-		if removed == 0 {
+		// Reading a directory while removing its entries may skip some of
+		// them on some file systems: read it again as long as something was
+		// removed. When nothing was, the directory is empty, or lists
+		// entries that are not there, which removing the directory tells.
+		if count == 0 {
 			return nil
 		}
-		// Reading a directory while removing its entries may skip some of
-		// them on some file systems: read it again until it is empty.
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return err
+			return &os.PathError{Op: "read", Path: dir.path(), Err: err}
 		}
 	}
 }
 
-// unlink removes the entry name of the open directory dir: a directory if
+// unlink removes e, the entry name of the open directory dir: a directory if
 // flags is unix.AT_REMOVEDIR, anything else if it is 0. inTree tells whether
-// dir is itself part of the tree to remove.
-func (r *remover) unlink(dir int, name string, flags int, path string, inTree bool) error {
+// dir is itself part of the tree to remove. removed tells whether the entry
+// was there to remove.
+func (r *remover) unlink(dir int, e *entry, name string, flags int, inTree bool) (removed bool, err error) {
 	remove := func() error {
 		_, err := retry(func() (int, error) { return 0, unix.Unlinkat(dir, name, flags) })
 		return err
 	}
-	err := remove()
+	err = remove()
 	if errors.Is(err, unix.EACCES) && inTree {
 		// A directory of the tree without the write permission, such as
 		// those of a Go module cache: its owner can still remove its entries
@@ -158,15 +214,20 @@ func (r *remover) unlink(dir int, name string, flags int, path string, inTree bo
 		}
 	}
 	switch {
-	case err == nil, errors.Is(err, unix.ENOENT):
-		return nil
+	case err == nil:
+		return true, nil
+	case errors.Is(err, unix.ENOENT):
+		return false, nil
 	case errors.Is(err, unix.EBUSY):
 		// unlink(2) and rmdir(2) refuse to remove a mount point.
-		return &MountPointError{Path: path}
+		return false, &MountPointError{Path: e.path()}
 	default:
-		return &os.PathError{Op: "remove", Path: path, Err: err}
+		return false, &os.PathError{Op: "remove", Path: e.path(), Err: err}
 	}
 }
+
+// errOtherMount is the error of makeAccessible for a mount point.
+var errOtherMount = errors.New("on another mount")
 
 // retry makes the system call again while a signal interrupts it.
 func retry(call func() (int, error)) (int, error) {

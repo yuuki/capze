@@ -211,6 +211,72 @@ func TestRemoveTreeReadOnlyDirectories(t *testing.T) {
 	}
 }
 
+// The owner of a directory can remove it even if it may not read it.
+func TestRemoveTreeUnreadableDirectories(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root needs no permission")
+	}
+	tree := filepath.Join(t.TempDir(), "tree")
+	empty := filepath.Join(tree, "empty")
+	full := filepath.Join(tree, "full")
+	mustMkdir(t, empty)
+	mustMkdir(t, filepath.Join(full, "sub"))
+	mustWrite(t, filepath.Join(full, "sub", "file"))
+	for _, dir := range []string{filepath.Join(full, "sub"), full, empty} {
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RemoveTree(t.Context(), tree); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(tree); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the tree is still there: %v", err)
+	}
+}
+
+// A tree deeper than the longest path the kernel accepts: no path of the
+// tree is ever given to the kernel, nor kept for each level.
+func TestRemoveTreeDeep(t *testing.T) {
+	const depth = 3000
+	tree := filepath.Join(t.TempDir(), "tree")
+	mustMkdir(t, tree)
+	fd, err := unix.Open(tree, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range depth {
+		if err := unix.Mkdirat(fd, "d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		next, err := unix.Openat(fd, "d", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		_ = unix.Close(fd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd = next
+	}
+	_ = unix.Close(fd)
+
+	if err := RemoveTree(t.Context(), tree); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(tree); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the tree is still there: %v", err)
+	}
+}
+
+func TestEntryPath(t *testing.T) {
+	root := &entry{name: "/trash/release"}
+	file := &entry{parent: &entry{parent: root, name: "etc"}, name: "passwd"}
+	if got := root.path(); got != "/trash/release" {
+		t.Errorf("root.path() = %q", got)
+	}
+	if got := file.path(); got != "/trash/release/etc/passwd" {
+		t.Errorf("file.path() = %q", got)
+	}
+}
+
 func mustMkdir(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -30,10 +30,14 @@ func (l *Layout) Rollback(ctx context.Context, to string) (Release, error) {
 		return Release{}, err
 	}
 	if target != h.current {
-		if err := l.switchTo(h.releases[target].ID); err != nil {
+		if err := l.prepareSwitch(h.releases[target].ID); err != nil {
 			return Release{}, err
 		}
-		if err := l.syncSwitch(h.releases[target].ID); err != nil {
+		if err := ctx.Err(); err != nil {
+			l.cancelSwitch()
+			return Release{}, err
+		}
+		if err := l.commitSwitch(); err != nil {
 			return Release{}, err
 		}
 	}

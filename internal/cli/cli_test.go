@@ -3,9 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -31,7 +34,7 @@ func mustCapze(t *testing.T, args ...string) string {
 
 // newDirs returns a new deploy directory, and a function that makes source
 // directories on its file system.
-func newDirs(t *testing.T) (deployDir string, source func() string) {
+func newDirs(t testing.TB) (deployDir string, source func() string) {
 	t.Helper()
 	root := t.TempDir()
 	deployDir = filepath.Join(root, "app")
@@ -151,7 +154,7 @@ func TestDeploySucceedsWhenPruningFails(t *testing.T) {
 	mustCapze(t, "deploy", source(), dir)
 	// The trash cannot be used: pruning fails.
 	trash := filepath.Join(dir, ".capze", "trash")
-	if err := os.Mkdir(trash, 0o500); err != nil {
+	if err := os.Chmod(trash, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(trash, 0o700) })
@@ -334,8 +337,8 @@ func TestBuildVersion(t *testing.T) {
 	}
 }
 
-// What the command line accepts is either refused as a whole, or run: it
-// never panics, and it never takes an option for a directory.
+// A command line that names no existing file can do nothing: it never
+// panics, it succeeds only by printing help, and it fails with a message.
 func FuzzParse(f *testing.F) {
 	f.Add("prune\x00--keep\x001\x00--dry-run\x00dir")
 	f.Add("deploy\x00src\x00--no-prune\x00dir")
@@ -369,4 +372,81 @@ func FuzzParse(f *testing.F) {
 			t.Errorf("capze %q failed with status %d without a message", args, status)
 		}
 	})
+}
+
+// However --dry-run and the other arguments of capze prune are arranged,
+// nothing is deleted: the option is never taken for a directory, nor
+// ignored. Either the dry run runs, or the command line is refused.
+func FuzzDryRunNeverDeletes(f *testing.F) {
+	dir, source := newDirs(f)
+	for range 3 {
+		var out, errs bytes.Buffer
+		if status := Run(f.Context(), []string{"deploy", "--no-prune", "--no-sync", source(), dir}, &out, &errs, "1.2.3"); status != exitOK {
+			f.Fatalf("capze deploy: status %d: %s", status, errs.String())
+		}
+	}
+	releases := func() []string {
+		entries, err := os.ReadDir(filepath.Join(dir, "releases"))
+		if err != nil {
+			f.Fatal(err)
+		}
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		return names
+	}
+	want := releases()
+	// The arguments to arrange: each byte of the input picks one.
+	words := []string{"--dry-run", "-dry-run", "--dry-run=true", "--keep", "--keep=1", "1", "--", "-", dir, dir + "/", "--no-prune", ""}
+
+	f.Add([]byte{8, 0})
+	f.Add([]byte{0, 3, 5, 8})
+	f.Add([]byte{6, 8, 0})
+	f.Add([]byte{3, 0, 8})
+	f.Add([]byte{8, 8, 0})
+	f.Fuzz(func(t *testing.T, picks []byte) {
+		if len(picks) > 8 {
+			t.Skip()
+		}
+		args := []string{"prune"}
+		dryRun := false
+		for _, pick := range picks {
+			word := words[int(pick)%len(words)]
+			dryRun = dryRun || strings.Contains(word, "dry-run")
+			args = append(args, word)
+		}
+		if !dryRun {
+			t.Skip()
+		}
+		var out, errs bytes.Buffer
+		status := Run(t.Context(), args, &out, &errs, "1.2.3")
+		if got := releases(); !slices.Equal(got, want) {
+			t.Fatalf("capze %q deleted releases: %v are left of %v", args, got, want)
+		}
+		if status == exitFailed {
+			t.Errorf("capze %q failed: %s", args, errs.String())
+		}
+	})
+}
+
+func TestPrintErrors(t *testing.T) {
+	// A file of a release may have any name.
+	forged := errors.New("open /app/releases/2026/a\ncapze: all is well\x1b[2J: permission denied")
+	err := errors.Join(errors.New("first"), fmt.Errorf("wrapped: %w", forged), context.Canceled)
+	var out bytes.Buffer
+	printErrors(&out, "capze: ", err)
+	want := "capze: first\n" +
+		`capze: wrapped: open /app/releases/2026/a\ncapze: all is well\x1b[2J: permission denied` + "\n" +
+		"capze: interrupted\n"
+	if got := out.String(); got != want {
+		t.Errorf("printErrors wrote:\n%swant:\n%s", got, want)
+	}
+
+	// An error that wraps the interruption keeps what it says.
+	out.Reset()
+	printErrors(&out, "capze: ", fmt.Errorf("/app/.capze/trash/2026 is left to delete: %w", context.Canceled))
+	if got, want := out.String(), "capze: /app/.capze/trash/2026 is left to delete: context canceled\n"; got != want {
+		t.Errorf("printErrors wrote %q, want %q", got, want)
+	}
 }

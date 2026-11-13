@@ -29,8 +29,8 @@ restart anything, so it fits into any script or tool that does.
 - **`current` always points to a whole release.** It changes by one
   `rename(2)`, after the files of the new release are flushed to disk.
 - **Nothing is deleted through a mount point.** A release that still has a
-  mount below it (a bind mount of a running container, for instance) is left,
-  and reported, instead of deleting the files that are mounted there.
+  mount below it (a bind mount of a running container, for instance) is left
+  whole, and reported, instead of deleting the files that are mounted there.
 - **Rollbacks follow the history.** `capze rollback` goes to the release
   before the current one, as many times as needed, and the next deployment
   forgets the releases that were rolled back.
@@ -92,7 +92,8 @@ $ capze deploy --keep 5 /var/www/app/incoming /var/www/app
 
 `SOURCE_DIR` is moved, never copied, so it must be on the file system of
 `DEPLOY_DIR`; a directory of `DEPLOY_DIR` itself, as above, always is. It is
-no longer there after the deployment. `DEPLOY_DIR` must exist: `capze` does
+no longer there after the deployment. A deployment that fails leaves
+`SOURCE_DIR`, the releases and `current` as they were. `DEPLOY_DIR` must exist: `capze` does
 not create it, so that a mistyped path fails instead of starting a new, empty
 deploy directory.
 
@@ -145,10 +146,14 @@ and then deleted. If the deletion fails or is interrupted, what is left stays
 in the trash, where the next `capze prune` or `capze deploy` deletes it;
 `--dry-run` lists it too.
 
-`capze` never deletes through a mount point. If a release has a file system
-mounted below it, the deletion stops with an error that names the mount
-point, and the exit status of `capze prune` is 1. Unmount it and run
-`capze prune` again.
+`capze` never deletes through a mount point. A release that has a file
+system mounted below it is in use: `capze prune` leaves it whole, where it
+is, with an error that names the mount point, and exits with 1. Unmount it
+and run `capze prune` again.
+
+`capze prune` needs to know which release is in use. If `current` exists but
+does not lead to a release, it deletes nothing and fails; without a
+`current` link, it keeps the `N` newest releases.
 
 Only the directories of `releases` named `YYYYMMDDhhmmss` are releases:
 `capze` never touches other files kept there.

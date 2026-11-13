@@ -109,12 +109,32 @@ func (f *fixture) history() []string {
 	return got
 }
 
-// wantHistory checks the releases, and that current leads to the version
-// that the current release holds.
+// wantHistory checks the releases and their states, and, without relying on
+// how capze finds the current release, that current leads to the release
+// whose state is current.
 func (f *fixture) wantHistory(want ...string) {
 	f.t.Helper()
 	if got := f.history(); !slices.Equal(got, want) {
 		f.t.Errorf("releases = %v, want %v", got, want)
+	}
+	for _, w := range want {
+		id, isCurrent := strings.CutSuffix(w, "=current")
+		if !isCurrent {
+			continue
+		}
+		target, err := filepath.EvalSymlinks(filepath.Join(f.Dir(), "current"))
+		if err != nil {
+			f.t.Errorf("current: %v", err)
+			continue
+		}
+		release, err := os.Stat(filepath.Join(f.Dir(), "releases", id))
+		if err != nil {
+			f.t.Errorf("release %s: %v", id, err)
+			continue
+		}
+		if !inside(target, release) {
+			f.t.Errorf("current leads to %s, which is not in the release %s", target, id)
+		}
 	}
 }
 
@@ -179,12 +199,16 @@ func TestOpen(t *testing.T) {
 	}
 	// Without a link on the way, a path with ".." is what it seems to be,
 	// and a link to the deploy directory is as good as its path.
-	for _, dir := range []string{filepath.Join(root, "app") + "/../app/.", link} {
+	applink := filepath.Join(root, "applink")
+	if err := os.Symlink("app", applink); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Join(root, "app") + "/../app/.", link, applink, applink + "/", applink + "/."} {
 		if _, err := Open(dir); err != nil {
 			t.Errorf("Open(%s): %v", dir, err)
 		}
 	}
-	for _, name := range []string{"link", "app", "sub"} {
+	for _, name := range []string{"link", "applink", "app", "sub"} {
 		if err := os.RemoveAll(filepath.Join(root, name)); err != nil {
 			t.Fatal(err)
 		}
@@ -228,6 +252,11 @@ func TestDeploy(t *testing.T) {
 		t.Errorf("current/version = %q, want v1", got)
 	}
 	f.wantHistory("20261113101500=current")
+	// The trash is there from the first deployment: pruning must not have
+	// to create it on a file system that is full. Only its user enters it.
+	if info, err := os.Stat(f.trashPath()); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("trash: %v, %v, want a directory with mode 0700", info, err)
+	}
 
 	moved := filepath.Join(f.root, "moved")
 	if err := os.Rename(f.Dir(), moved); err != nil {
@@ -357,7 +386,7 @@ func TestDeployFromOtherFileSystem(t *testing.T) {
 	}
 
 	_, err = f.Deploy(t.Context(), other, true)
-	if err == nil || !strings.Contains(err.Error(), "not on the file system") {
+	if err == nil || !strings.Contains(err.Error(), "another file system") {
 		t.Fatalf("Deploy = %v, want a file system error", err)
 	}
 	// Nothing changed, on either side.
@@ -616,13 +645,104 @@ func TestPruneAfterRollback(t *testing.T) {
 func TestPruneWithoutCurrent(t *testing.T) {
 	f := newFixture(t)
 	a, b, c := f.deploy("a"), f.deploy("b"), f.deploy("c")
-	if err := os.Remove(filepath.Join(f.Dir(), "current")); err != nil {
+	current := filepath.Join(f.Dir(), "current")
+	if err := os.Remove(current); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.prune(2); !slices.Equal(got, f.releasePaths(a)) {
 		t.Errorf("Prune(2) deleted %v, want %v", got, f.releasePaths(a))
 	}
 	f.wantHistory(b, c)
+}
+
+// A current that does not tell which release is in use is not the same as no
+// current: counting from the newest release could delete the one in use.
+func TestPruneRefusesUnknownCurrent(t *testing.T) {
+	f := newFixture(t)
+	a, b, c := f.deploy("a"), f.deploy("b"), f.deploy("c")
+	current := filepath.Join(f.Dir(), "current")
+	elsewhere := t.TempDir()
+	strays := map[string]func() error{
+		"a link to a release that is gone": func() error { return os.Symlink("releases/20200101000000", current) },
+		"a link to another directory":      func() error { return os.Symlink(elsewhere, current) },
+		"a link to releases":               func() error { return os.Symlink("releases", current) },
+		"a directory":                      func() error { return os.Mkdir(current, 0o755) },
+		"a file":                           func() error { return os.WriteFile(current, nil, 0o644) },
+	}
+	for name, make := range strays {
+		t.Run(name, func(t *testing.T) {
+			if err := os.Remove(current); err != nil {
+				t.Fatal(err)
+			}
+			if err := make(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Prune(t.Context(), 1, nil); err == nil {
+				t.Error("Prune succeeded")
+			}
+			if plan, err := f.Plan(1); err == nil {
+				t.Errorf("Plan = %v", plan)
+			}
+			f.wantHistory(a, b, c)
+			if got := f.trash(); len(got) != 0 {
+				t.Errorf("trash = %v, want nothing", got)
+			}
+		})
+	}
+}
+
+// The releases and the trash must be on one file system: otherwise no
+// release could ever be deleted. The first deployment tells.
+func TestDeployNeedsOneFileSystem(t *testing.T) {
+	f := newFixture(t)
+	other, err := os.MkdirTemp("/dev/shm", "capze-test-")
+	if err != nil {
+		t.Skipf("no other file system: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(other) })
+	if same, err := fsutil.SameDevice(other, f.Dir()); err != nil || same {
+		t.Skipf("no other file system: SameDevice = %v, %v", same, err)
+	}
+	if err := os.Symlink(other, filepath.Join(f.Dir(), "releases")); err != nil {
+		t.Fatal(err)
+	}
+	src := f.source("a")
+	if _, err := f.Deploy(t.Context(), src, false); err == nil || !strings.Contains(err.Error(), "one file system") {
+		t.Errorf("Deploy = %v, want an error about one file system", err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "version")); err != nil {
+		t.Errorf("the source was moved: %v", err)
+	}
+	if entries, _ := os.ReadDir(other); len(entries) != 0 {
+		t.Errorf("releases holds %v", entries)
+	}
+}
+
+// A deployment that cannot discard a rolled-back release is undone: the
+// source is back where it was.
+func TestDeployUndoneWithoutPermission(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root needs no permission")
+	}
+	f := newFixture(t)
+	a, b := f.deploy("a"), f.deploy("b")
+	f.rollback("")
+	if err := os.Chmod(f.trashPath(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.trashPath(), 0o700) })
+
+	src := f.source("c")
+	if _, err := f.Deploy(t.Context(), src, false); err == nil || !strings.Contains(err.Error(), "discard the rolled-back release "+b) {
+		t.Fatalf("Deploy = %v, want a failure to discard %s", err, b)
+	}
+	if _, err := os.Stat(filepath.Join(src, "version")); err != nil {
+		t.Errorf("the source is no longer where it was: %v", err)
+	}
+	f.wantHistory(a+"=current", b+"=rolled-back")
+	if _, err := os.Lstat(f.nextLinkPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the link of the switch is left behind: %v", err)
+	}
 }
 
 // What is in the trash is deleted whatever it is, and a name taken there

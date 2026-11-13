@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/yuuki/capze/internal/layout"
 )
@@ -119,7 +121,7 @@ Print the path of each directory once it is deleted.
 
 The current release and the releases newer than it are never deleted. Nothing
 is deleted through a mount point: a release that has one below it is left,
-and reported.`,
+whole, and reported.`,
 		flags: func(fs *flag.FlagSet, o *options) {
 			keepFlag(fs, o)
 			fs.BoolVar(&o.dryRun, "dry-run", false, "print the paths that would be deleted, and delete nothing")
@@ -212,9 +214,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 	}
 
 	if err := cmd.run(ctx, &env{stdout: stdout, stderr: stderr}, &opts, operands); err != nil {
-		if errors.Is(err, context.Canceled) {
-			err = errors.New("interrupted")
-		}
 		printErrors(stderr, "capze: ", err)
 		return exitFailed
 	}
@@ -268,9 +267,38 @@ func printHelp(w io.Writer, cmd *command, fs *flag.FlagSet) {
 
 // printErrors prints each error that errors.Join put in err on its own line.
 func printErrors(w io.Writer, prefix string, err error) {
-	for line := range strings.SplitSeq(err.Error(), "\n") {
-		fmt.Fprintf(w, "%s%s\n", prefix, line)
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, err := range joined.Unwrap() {
+			printErrors(w, prefix, err)
+		}
+		return
 	}
+	message := err.Error()
+	// Only the error of the context itself: one that wraps it says more.
+	if err == context.Canceled { //nolint:errorlint // on purpose, see above
+		message = "interrupted"
+	}
+	fmt.Fprintf(w, "%s%s\n", prefix, printable(message))
+}
+
+// printable returns s with its control characters escaped. A message may
+// name a file of a release, whose name is anything: a newline in it must not
+// start what looks like another message of capze, nor an escape sequence
+// reach the terminal.
+func printable(s string) string {
+	if !strings.ContainsFunc(s, unicode.IsControl) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			quoted := strconv.QuoteRune(r)
+			b.WriteString(quoted[1 : len(quoted)-1])
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // open returns the Layout of dir, which tells on stderr when it waits for
@@ -282,6 +310,9 @@ func open(e *env, dir string) (*layout.Layout, error) {
 	}
 	l.Waiting = func() {
 		fmt.Fprintf(e.stderr, "capze: waiting for another capze to finish with %s\n", l.Dir())
+	}
+	l.Warn = func(message string) {
+		fmt.Fprintf(e.stderr, "capze: warning: %s\n", printable(message))
 	}
 	return l, nil
 }
