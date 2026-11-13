@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    # Let a week pass before proposing a new release: compromised releases
+    # are usually found and pulled within days. Security updates are not
+    # delayed.
+    cooldown:
+      default-days: 7
+    groups:
+      go-modules:
+        patterns: ["*"]
+    # Conventional Commits (AGENTS.md): build(deps): ...
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  # Also updates .github/workflows/actions.lock, which pins the commit of each
+  # action the workflows use.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+      include: "scope"
