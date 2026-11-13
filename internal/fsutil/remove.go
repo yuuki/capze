@@ -163,6 +163,10 @@ func (r *remover) removeDir(parent int, e *entry, name string, inTree bool, dept
 		r.root, r.rootEntry = fd, e
 	}
 	if err := r.removeEntries(f, fd, e, depth); err != nil {
+		if errors.Is(err, errTooDeep) && depth <= 1 {
+			// Not even the top of the tree can be read.
+			err = &os.PathError{Op: "read", Path: e.path(), Err: unix.EMFILE}
+		}
 		return false, err
 	}
 	// The directories that were moved here because they were too deep,
@@ -245,6 +249,10 @@ func (r *remover) removeEntries(f *os.File, fd int, dir *entry, depth int) error
 			if errors.Is(err, io.EOF) {
 				break
 			}
+			// Reading a directory may open a file too (macOS does).
+			if errors.Is(err, unix.EMFILE) || errors.Is(err, unix.ENFILE) {
+				return errTooDeep
+			}
 			if err != nil {
 				return &os.PathError{Op: "read", Path: dir.path(), Err: err}
 			}
@@ -294,9 +302,9 @@ func (r *remover) unlink(dir int, e *entry, name string, flags int, inTree bool)
 	}
 }
 
-// errTooDeep is the error of removeDir for a directory that cannot be opened
-// because too many of its parents are: it is to be moved to the root of the
-// tree.
+// errTooDeep is the error of removeDir for a directory that cannot be
+// opened, or read, because too many of its parents are open: it is to be
+// moved to the root of the tree.
 var errTooDeep = errors.New("too many open directories")
 
 // errOtherMount is the error of makeAccessible for a mount point.
