@@ -11,19 +11,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SyncTree flushes to disk the file system that holds the directory dir, and
-// so every file below dir (syncfs(2)).
-func SyncTree(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := unix.Syncfs(int(f.Fd())); err != nil {
-		return &os.PathError{Op: "syncfs", Path: dir, Err: err}
+// SyncFS flushes to disk the file system that holds the directory, and so
+// every file below it (syncfs(2)).
+func (d *Dir) SyncFS() error {
+	if err := unix.Syncfs(d.fd); err != nil {
+		return &os.PathError{Op: "syncfs", Path: d.path, Err: err}
 	}
 	return nil
 }
+
+func statID(st *unix.Stat_t) FileID { return FileID{Dev: st.Dev, Ino: st.Ino} }
+
+func statIsDir(st *unix.Stat_t) bool { return st.Mode&unix.S_IFMT == unix.S_IFDIR }
+
+func statIsSymlink(st *unix.Stat_t) bool { return st.Mode&unix.S_IFMT == unix.S_IFLNK }
 
 // mountOf returns the ID of the mount that holds the open file fd. Two
 // directories of the same file system have different mount IDs when one of

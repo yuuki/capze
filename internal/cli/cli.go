@@ -72,6 +72,7 @@ type options struct {
 	noPrune bool
 	noSync  bool
 	to      string
+	toSet   bool
 	dryRun  bool
 }
 
@@ -199,6 +200,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 		cmd.flags(fs, &opts)
 	}
 	operands, err := parse(fs, args)
+	fs.Visit(func(f *flag.Flag) { opts.toSet = opts.toSet || f.Name == "to" })
 	switch {
 	case errors.Is(err, flag.ErrHelp):
 		printHelp(stdout, cmd, fs)
@@ -348,7 +350,7 @@ func runRollback(ctx context.Context, e *env, o *options, args []string) error {
 	if err != nil {
 		return err
 	}
-	release, err := l.Rollback(ctx, o.to)
+	release, err := l.Rollback(ctx, o.to, o.toSet)
 	if err != nil {
 		return err
 	}

@@ -36,31 +36,24 @@ const removeBatch = 1024
 // can be removed later. Like os.RemoveAll, it does not follow symbolic links,
 // and it returns nil if dir does not exist.
 //
-// It keeps one directory open for each level of the tree: a tree deeper than
-// the limit of open files of the process is not removed.
+// However deep the tree is, RemoveTree keeps few directories open, and it
+// never gives the kernel a path of the tree, which may be longer than the
+// kernel accepts.
 func RemoveTree(ctx context.Context, dir string) error {
 	dir = filepath.Clean(dir)
 	parent, name := filepath.Dir(dir), filepath.Base(dir)
 	if name == "." || name == ".." || name == string(filepath.Separator) {
 		return &os.PathError{Op: "remove", Path: dir, Err: unix.EINVAL}
 	}
-	pfd, err := retry(func() (int, error) {
-		return unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	})
+	d, err := OpenDir(parent)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
 			return nil
 		}
-		return &os.PathError{Op: "open", Path: parent, Err: err}
+		return err
 	}
-	defer unix.Close(pfd)
-	mount, err := mountOf(pfd)
-	if err != nil {
-		return fmt.Errorf("cannot tell the mount point of %s: %w", parent, err)
-	}
-	r := remover{ctx: ctx, mount: mount}
-	_, err = r.removeDir(pfd, &entry{name: dir}, name, false)
-	return err
+	defer d.Close()
+	return d.RemoveTree(ctx, name)
 }
 
 // A remover removes the files of one mount.
@@ -69,7 +62,28 @@ type remover struct {
 	// mount identifies the mount of the parent of the tree: every directory
 	// of the tree must be on it.
 	mount uint64
+	// root is the open root of the tree, and rootEntry its entry.
+	root      int
+	rootEntry *entry
+	// hoisted are the names, in the root of the tree, of the directories
+	// that were too deep to enter and were moved there, to remove later.
+	hoisted []string
+	// hoists counts them, to name them.
+	hoists int
 }
+
+// maxOpenDepth is the number of nested directories that a remover keeps
+// open at once. A directory deeper than that is moved to the root of the
+// tree (it is on the same mount) and removed from there: the depth of a tree
+// is chosen by whoever made it, and must not exhaust the open files of the
+// process.
+const maxOpenDepth = 128
+
+// maxPasses is the number of times a remover reads a directory again to
+// find entries it was not given. Past that, something else is creating
+// files in the directory, and removing the directory tells so (ENOTEMPTY)
+// instead of running after it for ever.
+const maxPasses = 4
 
 // An entry is a file of the tree. Its path is only needed for an error: a
 // path kept for each level of a deep tree would take memory in proportion to
@@ -97,7 +111,7 @@ func (e *entry) path() string {
 // parent, and everything below it. inTree tells whether parent is itself part
 // of the tree to remove. removed tells whether the directory was there to
 // remove.
-func (r *remover) removeDir(parent int, e *entry, name string, inTree bool) (removed bool, err error) {
+func (r *remover) removeDir(parent int, e *entry, name string, inTree bool, depth int) (removed bool, err error) {
 	if err := r.ctx.Err(); err != nil {
 		return false, err
 	}
@@ -126,6 +140,9 @@ func (r *remover) removeDir(parent int, e *entry, name string, inTree bool) (rem
 		if errors.Is(err, unix.ENOENT) {
 			return false, nil
 		}
+		if depth > 1 && (errors.Is(err, unix.EMFILE) || errors.Is(err, unix.ENFILE)) {
+			return false, errTooDeep
+		}
 		return false, &os.PathError{Op: "open", Path: e.path(), Err: err}
 	}
 	// The mount is that of the directory that is open: a file system mounted
@@ -141,18 +158,61 @@ func (r *remover) removeDir(parent int, e *entry, name string, inTree bool) (rem
 		return false, &MountPointError{Path: e.path()}
 	}
 	f := os.NewFile(uintptr(fd), name) // f owns fd from here
-	err = r.removeEntries(f, fd, e)
-	_ = f.Close()
-	if err != nil {
+	defer f.Close()
+	if depth == 0 {
+		r.root, r.rootEntry = fd, e
+	}
+	if err := r.removeEntries(f, fd, e, depth); err != nil {
 		return false, err
+	}
+	// The directories that were moved here because they were too deep,
+	// which may move others here in turn.
+	for depth == 0 && len(r.hoisted) > 0 {
+		name := r.hoisted[len(r.hoisted)-1]
+		r.hoisted = r.hoisted[:len(r.hoisted)-1]
+		if _, err := r.removeDir(fd, &entry{parent: e, name: name}, name, true, 1); err != nil {
+			return false, err
+		}
 	}
 	return r.unlink(parent, e, name, unix.AT_REMOVEDIR, inTree)
 }
 
+// hoist moves the directory e, the entry name of the open directory dir, to
+// the root of the tree, under a name of its own.
+func (r *remover) hoist(dir int, e *entry, name string) error {
+	for {
+		to := fmt.Sprintf(".capze-hoisted-%d", r.hoists)
+		r.hoists++
+		err := unix.Renameat(dir, name, r.root, to)
+		if errors.Is(err, unix.EACCES) {
+			// Directories of the tree without the write permission.
+			if unix.Fchmod(dir, 0o700) == nil && unix.Fchmod(r.root, 0o700) == nil {
+				err = unix.Renameat(dir, name, r.root, to)
+			}
+		}
+		switch {
+		case err == nil:
+			r.hoisted = append(r.hoisted, to)
+			return nil
+		case errors.Is(err, unix.ENOENT):
+			return nil
+		case errors.Is(err, unix.EEXIST), errors.Is(err, unix.ENOTEMPTY), errors.Is(err, unix.ENOTDIR):
+			// The name is taken, by a file of the tree: try the next one.
+			if r.hoists > 1<<20 {
+				return &os.PathError{Op: "rename", Path: e.path(), Err: err}
+			}
+		case errors.Is(err, unix.EBUSY):
+			return &MountPointError{Path: e.path()}
+		default:
+			return &os.PathError{Op: "rename", Path: e.path(), Err: err}
+		}
+	}
+}
+
 // removeEntries removes every entry of the open directory f, whose file
 // descriptor is fd and whose entry is dir.
-func (r *remover) removeEntries(f *os.File, fd int, dir *entry) error {
-	for {
+func (r *remover) removeEntries(f *os.File, fd int, dir *entry, depth int) error {
+	for pass := 1; ; pass++ {
 		count := 0
 		for {
 			if err := r.ctx.Err(); err != nil {
@@ -163,9 +223,16 @@ func (r *remover) removeEntries(f *os.File, fd int, dir *entry) error {
 				e := &entry{parent: dir, name: de.Name()}
 				var removed bool
 				var err error
-				if de.IsDir() {
-					removed, err = r.removeDir(fd, e, e.name, true)
-				} else {
+				switch {
+				case de.IsDir() && depth >= maxOpenDepth:
+					removed, err = true, r.hoist(fd, e, e.name)
+				case de.IsDir():
+					removed, err = r.removeDir(fd, e, e.name, true, depth+1)
+					// The limit of open files is lower than expected.
+					if errors.Is(err, errTooDeep) {
+						removed, err = true, r.hoist(fd, e, e.name)
+					}
+				default:
 					removed, err = r.unlink(fd, e, e.name, 0, true)
 				}
 				if err != nil {
@@ -184,9 +251,10 @@ func (r *remover) removeEntries(f *os.File, fd int, dir *entry) error {
 		}
 		// Reading a directory while removing its entries may skip some of
 		// them on some file systems: read it again as long as something was
-		// removed. When nothing was, the directory is empty, or lists
-		// entries that are not there, which removing the directory tells.
-		if count == 0 {
+		// removed, a few times. When nothing was, the directory is empty, or
+		// lists entries that are not there; after a few times, something
+		// else fills it. Removing the directory tells both.
+		if count == 0 || pass == maxPasses {
 			return nil
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -225,6 +293,11 @@ func (r *remover) unlink(dir int, e *entry, name string, flags int, inTree bool)
 		return false, &os.PathError{Op: "remove", Path: e.path(), Err: err}
 	}
 }
+
+// errTooDeep is the error of removeDir for a directory that cannot be opened
+// because too many of its parents are: it is to be moved to the root of the
+// tree.
+var errTooDeep = errors.New("too many open directories")
 
 // errOtherMount is the error of makeAccessible for a mount point.
 var errOtherMount = errors.New("on another mount")

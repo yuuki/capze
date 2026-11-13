@@ -71,7 +71,7 @@ func (f *fixture) deploy(version string) string {
 
 func (f *fixture) rollback(to string) string {
 	f.t.Helper()
-	r, err := f.Rollback(f.t.Context(), to)
+	r, err := f.Rollback(f.t.Context(), to, to != "")
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -122,20 +122,61 @@ func (f *fixture) wantHistory(want ...string) {
 		if !isCurrent {
 			continue
 		}
-		target, err := filepath.EvalSymlinks(filepath.Join(f.Dir(), "current"))
-		if err != nil {
-			f.t.Errorf("current: %v", err)
-			continue
-		}
-		release, err := os.Stat(filepath.Join(f.Dir(), "releases", id))
-		if err != nil {
-			f.t.Errorf("release %s: %v", id, err)
-			continue
-		}
-		if !inside(target, release) {
-			f.t.Errorf("current leads to %s, which is not in the release %s", target, id)
+		if !f.holds(filepath.Join(f.Dir(), "releases", id), filepath.Join(f.Dir(), "current")) {
+			f.t.Errorf("current does not lead into the release %s", id)
 		}
 	}
+}
+
+// holds reports whether the directory that path leads to is the directory
+// dir or is below it.
+func (f *fixture) holds(dir, path string) bool {
+	f.t.Helper()
+	d, err := fsutil.OpenDir(dir)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer d.Close()
+	target, err := fsutil.OpenDir(path)
+	if err != nil {
+		return false
+	}
+	defer target.Close()
+	ancestors, err := target.Ancestors()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return slices.Contains(ancestors, d.ID())
+}
+
+// otherFileSystem returns a new directory on another file system than the
+// deploy directory, or skips the test.
+func (f *fixture) otherFileSystem() string {
+	f.t.Helper()
+	other, err := os.MkdirTemp("/dev/shm", "capze-test-")
+	if err != nil {
+		f.t.Skipf("no other file system: %v", err)
+	}
+	f.t.Cleanup(func() { _ = os.RemoveAll(other) })
+	a, err := fsutil.OpenDir(other)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := fsutil.OpenDir(f.Dir())
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer b.Close()
+	if a.ID().Dev == b.ID().Dev {
+		f.t.Skip("no other file system")
+	}
+	return other
+}
+
+// nextLink is the path of the link that a switch prepares.
+func (f *fixture) nextLink() string {
+	return filepath.Join(f.Dir(), ".capze", "current.next")
 }
 
 // currentVersion returns the content of current/version.
@@ -373,19 +414,12 @@ func TestDeployRefusesSource(t *testing.T) {
 func TestDeployFromOtherFileSystem(t *testing.T) {
 	f := newFixture(t)
 	old := f.deploy("old")
-	other, err := os.MkdirTemp("/dev/shm", "capze-test-")
-	if err != nil {
-		t.Skipf("no other file system: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(other) })
-	if same, err := fsutil.SameDevice(other, f.Dir()); err != nil || same {
-		t.Skipf("no other file system: SameDevice = %v, %v", same, err)
-	}
+	other := f.otherFileSystem()
 	if err := os.WriteFile(filepath.Join(other, "version"), []byte("new"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = f.Deploy(t.Context(), other, true)
+	_, err := f.Deploy(t.Context(), other, true)
 	if err == nil || !strings.Contains(err.Error(), "another file system") {
 		t.Fatalf("Deploy = %v, want a file system error", err)
 	}
@@ -410,7 +444,7 @@ func TestDeployNeedsSymbolicLink(t *testing.T) {
 		t.Errorf("the source was moved: %v", err)
 	}
 	f.wantHistory()
-	if _, err := f.Rollback(t.Context(), ""); err == nil {
+	if _, err := f.Rollback(t.Context(), "", false); err == nil {
 		t.Error("Rollback succeeded")
 	}
 }
@@ -444,8 +478,15 @@ func TestCurrentFoundThroughAnyLink(t *testing.T) {
 	relink(f.root)
 	f.wantHistory(a, b)
 
-	// Into a release: that release is in use.
+	// To a file: no directory is in use.
 	relink(filepath.Join("releases", a, "version"))
+	f.wantHistory(a, b)
+
+	// Into a release: that release is in use.
+	if err := os.Mkdir(filepath.Join(f.Dir(), "releases", a, "rootfs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	relink(filepath.Join("releases", a, "rootfs"))
 	f.wantHistory(a+"=current", b+"=rolled-back")
 	if got := f.prune(1); len(got) != 0 {
 		t.Errorf("Prune deleted %v", got)
@@ -478,7 +519,7 @@ func TestRollback(t *testing.T) {
 	}
 	f.wantHistory(a+"=current", b+"=rolled-back", c+"=rolled-back")
 
-	_, err := f.Rollback(t.Context(), "")
+	_, err := f.Rollback(t.Context(), "", false)
 	if err == nil || !strings.Contains(err.Error(), "no release older") {
 		t.Errorf("Rollback from the oldest release = %v", err)
 	}
@@ -500,13 +541,13 @@ func TestRollback(t *testing.T) {
 
 func TestRollbackErrors(t *testing.T) {
 	f := newFixture(t)
-	if _, err := f.Rollback(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "no release in") {
+	if _, err := f.Rollback(t.Context(), "", false); err == nil || !strings.Contains(err.Error(), "no release in") {
 		t.Errorf("Rollback without releases = %v", err)
 	}
 	a, b := f.deploy("a"), f.deploy("b")
 
-	for _, to := range []string{"20200101000000", "v1", "../" + a, filepath.Join(f.Dir(), "releases", a)} {
-		if _, err := f.Rollback(t.Context(), to); err == nil {
+	for _, to := range []string{"", "20200101000000", "v1", "../" + a, filepath.Join(f.Dir(), "releases", a)} {
+		if _, err := f.Rollback(t.Context(), to, true); err == nil {
 			t.Errorf("Rollback to %q succeeded", to)
 		}
 	}
@@ -516,7 +557,7 @@ func TestRollbackErrors(t *testing.T) {
 	if err := os.Remove(filepath.Join(f.Dir(), "current")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Rollback(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "--to") {
+	if _, err := f.Rollback(t.Context(), "", false); err == nil || !strings.Contains(err.Error(), "--to") {
 		t.Errorf("Rollback without a current release = %v", err)
 	}
 	if got := f.rollback(a); got != a {
@@ -691,30 +732,201 @@ func TestPruneRefusesUnknownCurrent(t *testing.T) {
 	}
 }
 
-// The releases and the trash must be on one file system: otherwise no
-// release could ever be deleted. The first deployment tells.
-func TestDeployNeedsOneFileSystem(t *testing.T) {
+// releases, .capze and the trash are directories of their own. A symbolic
+// link in the place of one of them would lead capze to delete, or to deploy,
+// somewhere else: every command refuses it, and nothing is touched where it
+// leads.
+func TestLayoutDirectoriesAreNotFollowed(t *testing.T) {
+	for _, name := range []string{"releases", ".capze", ".capze/trash"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			a, b := f.deploy("a"), f.deploy("b")
+			// A directory that looks like what capze would delete.
+			victim := filepath.Join(f.root, "victim")
+			for _, dir := range []string{"20200101000000", "20200102000000", "trash/20200103000000", "precious"} {
+				if err := os.MkdirAll(filepath.Join(victim, dir, "data"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(f.Dir(), name)
+			if err := os.Rename(path, path+".real"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victim, path); err != nil {
+				t.Fatal(err)
+			}
+
+			src := f.source("c")
+			if _, err := f.Deploy(t.Context(), src, false); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+				t.Errorf("Deploy = %v, want an error about a symbolic link", err)
+			}
+			if _, err := os.Stat(filepath.Join(src, "version")); err != nil {
+				t.Errorf("the source was moved: %v", err)
+			}
+			if err := f.Prune(t.Context(), 1, nil); err == nil {
+				t.Error("Prune succeeded")
+			}
+			if plan, err := f.Plan(1); err == nil {
+				t.Errorf("Plan = %v", plan)
+			}
+			if _, err := f.Rollback(t.Context(), "", false); err == nil {
+				t.Error("Rollback succeeded")
+			}
+			if releases, err := f.Releases(); err == nil {
+				t.Errorf("Releases = %v", releases)
+			}
+
+			for _, dir := range []string{"20200101000000", "20200102000000", "trash/20200103000000", "precious"} {
+				if _, err := os.Stat(filepath.Join(victim, dir, "data")); err != nil {
+					t.Errorf("%s was deleted through the link: %v", dir, err)
+				}
+			}
+			if entries, _ := os.ReadDir(victim); len(entries) != 4 {
+				t.Errorf("something was created through the link: %v", entries)
+			}
+			// The deploy directory is as it was.
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".real", path); err != nil {
+				t.Fatal(err)
+			}
+			f.wantHistory(a, b+"=current")
+		})
+	}
+}
+
+// What is not a deploy directory stays as it is: the commands that only read
+// or delete create nothing in it.
+func TestNothingCreatedOutsideDeployments(t *testing.T) {
 	f := newFixture(t)
-	other, err := os.MkdirTemp("/dev/shm", "capze-test-")
+	if err := f.Prune(t.Context(), 1, nil); err != nil {
+		t.Errorf("Prune of an empty directory: %v", err)
+	}
+	if _, err := f.Rollback(t.Context(), "", false); err == nil {
+		t.Error("Rollback in an empty directory succeeded")
+	}
+	if _, err := f.Rollback(t.Context(), "20261113101500", true); err == nil {
+		t.Error("Rollback to a release in an empty directory succeeded")
+	}
+	if entries, _ := os.ReadDir(f.Dir()); len(entries) != 0 {
+		t.Errorf("the directory holds %v", entries)
+	}
+
+	// Nor in a release, taken for a deploy directory.
+	id := f.deploy("a")
+	release, err := Open(filepath.Join(f.Dir(), "current"))
 	if err != nil {
-		t.Skipf("no other file system: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(other) })
-	if same, err := fsutil.SameDevice(other, f.Dir()); err != nil || same {
-		t.Skipf("no other file system: SameDevice = %v, %v", same, err)
-	}
-	if err := os.Symlink(other, filepath.Join(f.Dir(), "releases")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := release.Rollback(t.Context(), "", false); err == nil {
+		t.Error("Rollback in a release succeeded")
+	}
+	if err := release.Prune(t.Context(), 1, nil); err != nil {
+		t.Errorf("Prune of a release: %v", err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(f.Dir(), "releases", id)); len(entries) != 1 {
+		t.Errorf("the release holds %v", entries)
+	}
+}
+
+// A source inside a release is refused however it is named: through
+// current, or through a link outside the deploy directory. Moving it would
+// take a part out of a release.
+func TestDeployRefusesPartOfRelease(t *testing.T) {
+	f := newFixture(t)
 	src := f.source("a")
-	if _, err := f.Deploy(t.Context(), src, false); err == nil || !strings.Contains(err.Error(), "one file system") {
-		t.Errorf("Deploy = %v, want an error about one file system", err)
+	if err := os.Mkdir(filepath.Join(src, "app"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(src, "version")); err != nil {
-		t.Errorf("the source was moved: %v", err)
+	r, err := f.Deploy(t.Context(), src, false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if entries, _ := os.ReadDir(other); len(entries) != 0 {
+	f.deployed++
+	outside := filepath.Join(f.root, "latest")
+	if err := os.Symlink(r.Path, outside); err != nil {
+		t.Fatal(err)
+	}
+	trashed := filepath.Join(f.trashPath(), "left")
+	if err := os.Mkdir(trashed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outsideTrash := filepath.Join(f.root, "trash")
+	if err := os.Symlink(f.trashPath(), outsideTrash); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{
+		filepath.Join(f.Dir(), "current", "app"),
+		filepath.Join(outside, "app"),
+		filepath.Join(outsideTrash, "left"),
+	} {
+		if _, err := f.Deploy(t.Context(), source, false); err == nil || !strings.Contains(err.Error(), "already belongs") {
+			t.Errorf("Deploy(%s) = %v, want an error", source, err)
+		}
+	}
+	// The link to the release itself is a link.
+	if _, err := f.Deploy(t.Context(), outside+"/", false); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Errorf("Deploy(%s/) = %v, want an error", outside, err)
+	}
+	if _, err := os.Stat(filepath.Join(r.Path, "app")); err != nil {
+		t.Errorf("a part of the release was moved: %v", err)
+	}
+	f.wantHistory(r.ID + "=current")
+}
+
+// The directory that is checked is the directory that is deployed: if the
+// path leads to something else when it is moved, nothing is deployed.
+func TestDeployRefusesReplacedSource(t *testing.T) {
+	f := newFixture(t)
+	a, b := f.deploy("a"), f.deploy("b")
+	src := f.source("c")
+
+	// Hold the lock, so that the deployment waits after it has opened the
+	// source, and replace the source meanwhile.
+	h, err := f.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.close()
+	unlock, err := h.state.Lock(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting := make(chan struct{})
+	l, err := Open(f.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Now = f.Now
+	l.Waiting = func() { close(waiting) }
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.Deploy(t.Context(), src, false)
+		done <- err
+	}()
+	<-waiting
+	if err := os.Rename(src, src+".real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(f.Dir(), "releases", a), src); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "was replaced") {
+		t.Fatalf("Deploy = %v, want an error about a replaced source", err)
+	}
+	f.wantHistory(a, b+"=current")
+	// What replaced the source is back where it was.
+	if target, err := os.Readlink(src); err != nil || target != filepath.Join(f.Dir(), "releases", a) {
+		t.Errorf("the source is %q, %v, want the link that replaced it", target, err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(f.Dir(), "releases")); len(entries) != 2 {
 		t.Errorf("releases holds %v", entries)
+	}
+	if _, err := os.Lstat(f.nextLink()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the link of the switch is left behind: %v", err)
 	}
 }
 
@@ -740,8 +952,29 @@ func TestDeployUndoneWithoutPermission(t *testing.T) {
 		t.Errorf("the source is no longer where it was: %v", err)
 	}
 	f.wantHistory(a+"=current", b+"=rolled-back")
-	if _, err := os.Lstat(f.nextLinkPath()); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(f.nextLink()); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the link of the switch is left behind: %v", err)
+	}
+
+	// The source cannot leave its directory: the rolled-back release, which
+	// was discarded before, is back.
+	if err := os.Chmod(f.trashPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(f.root, "locked")
+	if err := os.MkdirAll(filepath.Join(locked, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if _, err := f.Deploy(t.Context(), filepath.Join(locked, "src"), false); err == nil || !strings.Contains(err.Error(), "move ") {
+		t.Fatalf("Deploy = %v, want a failure to move the source", err)
+	}
+	f.wantHistory(a+"=current", b+"=rolled-back")
+	if got := f.trash(); len(got) != 0 {
+		t.Errorf("trash = %v, want nothing", got)
 	}
 }
 
@@ -841,7 +1074,12 @@ func TestConcurrentDeployments(t *testing.T) {
 func TestCommandsWaitForLock(t *testing.T) {
 	f := newFixture(t)
 	a := f.deploy("a")
-	unlock, err := f.lock(t.Context())
+	h, err := f.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.close()
+	unlock, err := h.state.Lock(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

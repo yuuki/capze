@@ -1,9 +1,16 @@
 # Security policy
 
 capze usually runs as root, or as the user that owns an application, and it
-moves and deletes directory trees. It trusts its command line and the owner
-of the deploy directory. It does not trust the content of a release: a
-release may be the file system of a container image.
+moves and deletes directory trees. It trusts its command line, and the
+owners of the directories that lead to `SOURCE_DIR` and `DEPLOY_DIR`: it
+resolves these two paths as the kernel does, so whoever can write to one of
+their parent directories chooses what they lead to. Do not run capze as root
+on paths below a directory that another user can write.
+
+It does not trust the content of a release, which may be the file system of
+a container image, and it does not follow what stands in the place of
+`releases`, `.capze` or `.capze/trash`: a symbolic link or a mount point
+there stops capze instead of leading it elsewhere.
 
 Examples of what is in scope:
 
@@ -13,13 +20,19 @@ Examples of what is in scope:
 - Deleting files through a mount point below a release.
 - A `current` link that points, even for an instant, to something that is
   not a whole release as a result of a capze command.
+- A symbolic link or a mount point in the place of `releases`, `.capze` or
+  `.capze/trash` that makes capze deploy, delete or create a file where it
+  leads.
+- A source directory replaced during a deployment that becomes a release
+  without being the directory capze checked.
+- A release whose content keeps `capze prune` from ever deleting it.
 - Files of a discarded release becoming reachable by users who could not
   reach them in `releases`.
 - Problems with the release archives, packages, checksums or attestations.
 
-Out of scope: what a user who can write to the deploy directory, or who
-chooses the command line, can make capze do there; they can do the same
-without capze.
+Out of scope: what a user who chooses the command line, or who can write to
+the deploy directory itself, can make capze do inside that deploy directory;
+they can do the same without capze.
 
 ## Supported versions
 

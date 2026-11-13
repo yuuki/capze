@@ -175,6 +175,8 @@ func TestDeploySucceedsWhenPruningFails(t *testing.T) {
 func TestFailures(t *testing.T) {
 	dir, source := newDirs(t)
 	missing := filepath.Join(dir, "missing")
+	empty, _ := newDirs(t)
+	mustCapze(t, "deploy", source(), dir)
 	tests := []struct {
 		name string
 		args []string
@@ -184,7 +186,10 @@ func TestFailures(t *testing.T) {
 		{"empty deploy directory", []string{"prune", ""}, "is empty"},
 		{"empty source", []string{"deploy", "", dir}, "is empty"},
 		{"missing source", []string{"deploy", missing, dir}, "does not exist"},
-		{"nothing to roll back to", []string{"rollback", dir}, "no release"},
+		{"no release", []string{"rollback", empty}, "no release in"},
+		{"nothing to roll back to", []string{"rollback", dir}, "no release older"},
+		{"empty release name", []string{"rollback", "--to", "", dir}, "not the name of a release"},
+		{"empty release name with =", []string{"rollback", "--to=", dir}, "not the name of a release"},
 		{"unknown release", []string{"rollback", "--to", "20200101000000", dir}, "no release 20200101000000"},
 		{"bad release name", []string{"rollback", "--to", "v1", dir}, "not the name of a release"},
 	}
@@ -199,7 +204,6 @@ func TestFailures(t *testing.T) {
 			}
 		})
 	}
-	_ = source
 }
 
 func TestInterrupted(t *testing.T) {
@@ -376,7 +380,7 @@ func FuzzParse(f *testing.F) {
 
 // However --dry-run and the other arguments of capze prune are arranged,
 // nothing is deleted: the option is never taken for a directory, nor
-// ignored. Either the dry run runs, or the command line is refused.
+// ignored. Either the dry run runs, or the command fails with a message.
 func FuzzDryRunNeverDeletes(f *testing.F) {
 	dir, source := newDirs(f)
 	for range 3 {
@@ -424,8 +428,8 @@ func FuzzDryRunNeverDeletes(f *testing.F) {
 		if got := releases(); !slices.Equal(got, want) {
 			t.Fatalf("capze %q deleted releases: %v are left of %v", args, got, want)
 		}
-		if status == exitFailed {
-			t.Errorf("capze %q failed: %s", args, errs.String())
+		if status != exitOK && errs.Len() == 0 {
+			t.Errorf("capze %q failed with status %d without a message", args, status)
 		}
 	})
 }

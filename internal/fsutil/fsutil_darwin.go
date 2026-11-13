@@ -6,17 +6,21 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SyncTree flushes every file system to disk (sync(2)): macOS has no call
-// that flushes only the file system that holds dir.
-func SyncTree(dir string) error {
-	if _, err := os.Stat(dir); err != nil {
-		return err
-	}
+// SyncFS asks the system to write every file system to disk (sync(2)):
+// macOS has no call that flushes only the file system that holds the
+// directory, and sync(2) may return before the writes are done.
+func (d *Dir) SyncFS() error {
 	if err := unix.Sync(); err != nil {
-		return &os.PathError{Op: "sync", Path: dir, Err: err}
+		return &os.PathError{Op: "sync", Path: d.path, Err: err}
 	}
 	return nil
 }
+
+func statID(st *unix.Stat_t) FileID { return FileID{Dev: uint64(st.Dev), Ino: st.Ino} }
+
+func statIsDir(st *unix.Stat_t) bool { return st.Mode&unix.S_IFMT == unix.S_IFDIR }
+
+func statIsSymlink(st *unix.Stat_t) bool { return st.Mode&unix.S_IFMT == unix.S_IFLNK }
 
 // mountOf identifies the mount that holds the open file fd by its device
 // number: macOS has no bind mounts, so that two directories of one file

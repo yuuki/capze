@@ -34,6 +34,9 @@ restart anything, so it fits into any script or tool that does.
 - **Rollbacks follow the history.** `capze rollback` goes to the release
   before the current one, as many times as needed, and the next deployment
   forgets the releases that were rolled back.
+- **Nothing outside the deploy directory is touched.** `capze` works in the
+  directories it opened, not along paths, and follows no symbolic link in
+  the place of `releases` or `.capze`.
 - **One at a time.** The commands that change a deploy directory wait for
   each other.
 
@@ -199,8 +202,13 @@ Without `droot run --unshare`, a container leaves mounts below its release.
 |---|---|
 | `releases/YYYYMMDDhhmmss/` | The releases. The names sort in the order of the deployments. |
 | `current` | Relative symbolic link to the release in use. |
-| `.capze/lock` | Lock held by the commands that change the deploy directory. |
+| `.capze/` | Belongs to `capze`. The commands that change the deploy directory lock it. |
 | `.capze/trash/` | Releases that are being deleted. Only the user of `capze` can enter it. |
+
+`releases`, `.capze` and `.capze/trash` must be directories of their own, on
+the file system of the deploy directory: `capze` refuses to work if one of
+them is a symbolic link or a mount point, rather than deploy or delete where
+it leads.
 
 The link is relative, so the deploy directory can be moved, or mounted under
 another path. `capze` also understands a `current` made by hand, relative or

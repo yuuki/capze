@@ -179,9 +179,6 @@ func TestFailedDeployChangesNothing(t *testing.T) {
 	unmount := bindMount(t, f.root, build, alias)
 	defer unmount(alias)
 	src := filepath.Join(alias, "new")
-	if same, err := fsutil.SameDevice(src, f.Dir()); err != nil || !same {
-		t.Fatalf("SameDevice = %v, %v: the test needs one file system", same, err)
-	}
 
 	_, err := f.Deploy(t.Context(), src, false)
 	if err == nil || !strings.Contains(err.Error(), "another mount") {
@@ -233,7 +230,7 @@ func checkUnchanged(t *testing.T, f *fixture, src string, history ...string) {
 	if got := f.trash(); len(got) != 0 {
 		t.Errorf("trash = %v, want nothing", got)
 	}
-	if _, err := os.Lstat(f.nextLinkPath()); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(f.nextLink()); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the link of the switch is left behind: %v", err)
 	}
 }
@@ -267,4 +264,39 @@ func TestCurrentFoundThroughAnotherMount(t *testing.T) {
 		t.Errorf("Deploy of a release through another mount = %v", err)
 	}
 	f.wantHistory(a+"=current", b+"=rolled-back", c+"=rolled-back")
+}
+
+// A file system mounted on the trash, or on .capze, is not the trash: what
+// is mounted there is not deleted.
+func TestPruneRefusesMountedTrash(t *testing.T) {
+	for _, name := range []string{".capze", ".capze/trash"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			host, precious := hostDir(t, f)
+			if err := os.MkdirAll(filepath.Join(host, "trash", "data"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			a, b, c := f.deploy("a"), f.deploy("b"), f.deploy("c")
+			mountPoint := filepath.Join(f.Dir(), name)
+			unmount := bindMount(t, f.root, host, mountPoint)
+			defer unmount(mountPoint)
+
+			if err := f.Prune(t.Context(), 1, nil); err == nil || !strings.Contains(err.Error(), "another mount") {
+				t.Errorf("Prune = %v, want an error about another mount", err)
+			}
+			if plan, err := f.Plan(1); err == nil {
+				t.Errorf("Plan = %v", plan)
+			}
+			if _, err := f.Deploy(t.Context(), f.source("d"), false); err == nil {
+				t.Error("Deploy succeeded")
+			}
+			for _, path := range []string{precious, filepath.Join(host, "trash", "data")} {
+				if _, err := os.Stat(path); err != nil {
+					t.Errorf("a file was deleted through the mount: %v", err)
+				}
+			}
+			unmount(mountPoint)
+			f.wantHistory(a, b, c+"=current")
+		})
+	}
 }

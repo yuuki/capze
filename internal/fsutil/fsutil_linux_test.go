@@ -171,8 +171,8 @@ func TestRemoveTreeStopsAtBindMount(t *testing.T) {
 	mustMkdir(t, mountPoint)
 	mustWrite(t, filepath.Join(tree, "file"))
 	unmount := bindMount(t, host, mountPoint)
-	if same, err := SameDevice(host, tree); err != nil || !same {
-		t.Fatalf("SameDevice = %v, %v: the test needs one file system", same, err)
+	if openDir(t, host).ID().Dev != openDir(t, tree).ID().Dev {
+		t.Fatal("the test needs one file system")
 	}
 
 	err := RemoveTree(t.Context(), tree)
@@ -328,5 +328,36 @@ func TestMakeAccessible(t *testing.T) {
 	}
 	if got := mode(host); got != 0o500 {
 		t.Errorf("the directory that is mounted has mode %o, want 500", got)
+	}
+}
+
+// A directory with a file system mounted on it is not a directory of its
+// own, even when the file system is the one of its parent.
+func TestDirSubRefusesMountPoint(t *testing.T) {
+	root := t.TempDir()
+	host := filepath.Join(root, "host")
+	mountPoint := filepath.Join(root, "mount-point")
+	mustMkdir(t, host)
+	mustMkdir(t, mountPoint)
+	bindMount(t, host, mountPoint)
+	d := openDir(t, root)
+
+	var mpe *MountPointError
+	if sub, err := d.Sub("mount-point"); !errors.As(err, &mpe) || mpe.Path != mountPoint {
+		sub.Close()
+		t.Errorf("Sub(mount point) = %v, want a MountPointError for %s", err, mountPoint)
+	}
+	if sub, err := d.MkSub("mount-point", 0o755); !errors.As(err, &mpe) {
+		sub.Close()
+		t.Errorf("MkSub(mount point) = %v, want a MountPointError", err)
+	}
+	// Follow goes through it, and tells that it is another mount.
+	followed, err := d.Follow("mount-point")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer followed.Close()
+	if followed.ID() != openDir(t, host).ID() || d.SameMount(followed) {
+		t.Errorf("Follow(mount point): the directory mounted %v, same mount %v", followed.ID() == openDir(t, host).ID(), d.SameMount(followed))
 	}
 }

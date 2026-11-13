@@ -7,13 +7,12 @@
 //	│   ├── 20261112093000
 //	│   └── 20261113101500
 //	└── .capze
-//	    ├── lock
 //	    └── trash
 //
 // Each directory of releases is one release, named after the time it was
 // deployed, and current is a symbolic link to the release in use. .capze
-// belongs to capze: the lock that serializes the commands that change the
-// deploy directory, and the releases that are being deleted.
+// belongs to capze: the commands that change the deploy directory lock it,
+// and its trash holds the releases that are being deleted.
 //
 // The package keeps these promises, which docs/design.md explains:
 //
@@ -23,16 +22,19 @@
 //   - The names of the releases sort in the order of their deployments.
 //   - The releases form one history, whose head is current: a deployment
 //     discards the releases newer than current, which were rolled back.
-//   - Nothing is deleted through a mount point.
+//   - Nothing is deleted through a mount point, nor outside the deploy
+//     directory: releases, .capze and its trash are directories of their
+//     own, on the mount of the deploy directory, and capze works in them
+//     through their file descriptors, not their paths.
 package layout
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/yuuki/capze/internal/fsutil"
@@ -43,7 +45,6 @@ const (
 	currentName  = "current"
 	releasesName = "releases"
 	stateName    = ".capze"
-	lockName     = "lock"
 	trashName    = "trash"
 	// nextLinkName is the name of the new current link, in the state
 	// directory, before it replaces the old one.
@@ -159,9 +160,7 @@ func (l *Layout) Dir() string { return l.dir }
 
 func (l *Layout) currentPath() string  { return filepath.Join(l.dir, currentName) }
 func (l *Layout) releasesPath() string { return filepath.Join(l.dir, releasesName) }
-func (l *Layout) statePath() string    { return filepath.Join(l.dir, stateName) }
 func (l *Layout) trashPath() string    { return filepath.Join(l.dir, stateName, trashName) }
-func (l *Layout) nextLinkPath() string { return filepath.Join(l.dir, stateName, nextLinkName) }
 
 func (l *Layout) warn(format string, args ...any) {
 	if l.Warn != nil {
@@ -169,13 +168,112 @@ func (l *Layout) warn(format string, args ...any) {
 	}
 }
 
-// Releases returns the releases of the deploy directory, oldest first.
-func (l *Layout) Releases() ([]Release, error) {
-	h, err := l.scan()
+// handles are the open directories of a deploy directory. Those that do not
+// exist are nil.
+//
+// Every change goes through them: an entry is renamed, linked or removed by
+// its name in an open directory. So nothing that is done to the paths while
+// a command runs, and no symbolic link or mount found in place of one of
+// these directories, can make capze work outside the deploy directory.
+type handles struct {
+	root, releases, state, trash *fsutil.Dir
+}
+
+func (h *handles) close() {
+	h.root.Close()
+	h.releases.Close()
+	h.state.Close()
+	h.trash.Close()
+}
+
+// open opens the directories of the deploy directory that exist. It fails if
+// one of them is not a directory of its own on the mount of the deploy
+// directory: a symbolic link or a mount point there would lead the releases,
+// or their deletion, somewhere else.
+func (l *Layout) open() (*handles, error) {
+	root, err := fsutil.OpenDir(l.dir)
 	if err != nil {
 		return nil, err
 	}
-	return h.releases, nil
+	h := &handles{root: root}
+	if h.releases, err = sub(h.root, releasesName); err == nil {
+		h.state, err = sub(h.root, stateName)
+	}
+	if err == nil && h.state != nil {
+		h.trash, err = sub(h.state, trashName)
+	}
+	if err != nil {
+		h.close()
+		return nil, err
+	}
+	return h, nil
+}
+
+// sub opens the directory name of dir, or returns nil if it does not exist.
+func sub(dir *fsutil.Dir, name string) (*fsutil.Dir, error) {
+	d, err := dir.Sub(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return d, plainDir(err)
+}
+
+// mkSub opens the directory name of dir, which it creates if needed.
+func mkSub(dir *fsutil.Dir, name string, perm uint32) (*fsutil.Dir, error) {
+	d, err := dir.MkSub(name, perm)
+	return d, plainDir(err)
+}
+
+// plainDir explains the error of a directory of the layout that is not a
+// directory of its own.
+func plainDir(err error) error {
+	var notDir *fsutil.NotPlainDirError
+	var mount *fsutil.MountPointError
+	switch {
+	case errors.As(err, &notDir):
+		return fmt.Errorf("%w: capze does not follow it", err)
+	case errors.As(err, &mount):
+		return fmt.Errorf("%s is on another mount than the deploy directory, which must be one file system", mount.Path)
+	}
+	return err
+}
+
+// ensureState creates .capze, which the commands that change the deploy
+// directory lock.
+func (h *handles) ensureState() (err error) {
+	if h.state == nil {
+		h.state, err = mkSub(h.root, stateName, 0o755)
+	}
+	return err
+}
+
+// ensureTrash creates the trash.
+//
+// Only the user of capze can enter it: a release keeps there the files,
+// setuid programs included, that the permissions of releases may have
+// protected.
+func (h *handles) ensureTrash() (err error) {
+	if err := h.ensureState(); err != nil {
+		return err
+	}
+	if h.trash == nil {
+		h.trash, err = mkSub(h.state, trashName, 0o700)
+	}
+	return err
+}
+
+// Releases returns the releases of the deploy directory, oldest first.
+func (l *Layout) Releases() ([]Release, error) {
+	h, err := l.open()
+	if err != nil {
+		return nil, err
+	}
+	defer h.close()
+	hist, err := l.scan(h)
+	if err != nil {
+		return nil, err
+	}
+	return hist.releases, nil
 }
 
 // A history is the releases of a deploy directory at one time.
@@ -188,6 +286,8 @@ type history struct {
 	// strayCurrent tells that current exists and does not lead to a release:
 	// which release is in use is then unknown.
 	strayCurrent bool
+	// currentIsLink tells that current exists and is a symbolic link.
+	currentIsLink bool
 	// newest is the last name of releases that is the name of a release, or
 	// "" without one. It may be the name of a file that is not a release (not
 	// a directory), which the next release must not take either.
@@ -207,87 +307,84 @@ func (h *history) find(id string) int {
 // scan reads the releases and the current link. Only the directories of
 // releases named like a release are releases: capze never touches the other
 // files someone may keep there.
-func (l *Layout) scan() (*history, error) {
-	entries, err := os.ReadDir(l.releasesPath())
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+func (l *Layout) scan(h *handles) (*history, error) {
+	hist := &history{current: -1}
+	var files []fsutil.FileID
+	if h.releases != nil {
+		// Sorted by name, and so by time of deployment.
+		names, err := h.releases.Names()
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range names {
+			if !validID(name) {
+				continue
+			}
+			st, err := h.releases.Lstat(name)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			hist.newest = name
+			if st.IsDir {
+				hist.releases = append(hist.releases, Release{ID: name, Path: filepath.Join(l.releasesPath(), name)})
+				files = append(files, st.ID)
+			}
+		}
+	}
+
+	link, err := h.root.Lstat(currentName)
+	if errors.Is(err, fs.ErrNotExist) {
+		return hist, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	h := &history{current: -1}
-	// os.ReadDir sorts the entries by name, and so by time of deployment.
-	for _, e := range entries {
-		if !validID(e.Name()) {
-			continue
-		}
-		h.newest = e.Name()
-		if e.IsDir() {
-			h.releases = append(h.releases, Release{ID: e.Name(), Path: filepath.Join(l.releasesPath(), e.Name())})
+	hist.currentIsLink = link.IsSymlink
+	hist.current = currentRelease(h, files)
+	hist.strayCurrent = hist.current < 0
+	if hist.current >= 0 {
+		hist.releases[hist.current].State = Current
+		for i := hist.current + 1; i < len(hist.releases); i++ {
+			hist.releases[i].State = RolledBack
 		}
 	}
-	if _, err := os.Lstat(l.currentPath()); err == nil {
-		h.current = h.find(l.currentID())
-		h.strayCurrent = h.current < 0
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-	if h.current >= 0 {
-		h.releases[h.current].State = Current
-		for i := h.current + 1; i < len(h.releases); i++ {
-			h.releases[i].State = RolledBack
-		}
-	}
-	return h, nil
+	return hist, nil
 }
 
-// currentID returns the name of the entry of releases that current leads
-// into, or "" if it leads elsewhere or nowhere.
+// currentRelease returns the index of the release, among those that files
+// identifies, that current leads into, or -1 if it leads elsewhere or
+// nowhere.
 //
 // Whatever the link is made of (relative, absolute, through another link or
-// another path to the deploy directory), the current release is the directory
-// it ends in, so the files are compared, not the paths. A link made by hand
-// to a directory inside a release counts too: pruning must not delete that
-// release.
-func (l *Layout) currentID() string {
-	path, err := filepath.EvalSymlinks(l.currentPath())
+// another path to the deploy directory), the current release is the
+// directory it ends in, so the directories themselves are compared, not
+// their paths. A link made by hand to a directory inside a release counts
+// too: pruning must not delete that release.
+func currentRelease(h *handles, files []fsutil.FileID) int {
+	target, err := h.root.Follow(currentName)
 	if err != nil {
-		return ""
+		return -1
 	}
-	releases, err := os.Stat(l.releasesPath())
+	defer target.Close()
+	ancestors, err := target.Ancestors()
 	if err != nil {
-		return ""
+		return -1
 	}
-	// Go up from where current ends until the directory is releases.
-	for {
-		parent := filepath.Dir(path)
-		if parent == path {
-			return ""
+	for i, file := range files {
+		if slices.Contains(ancestors, file) {
+			return i
 		}
-		if info, err := os.Stat(parent); err == nil && os.SameFile(info, releases) {
-			return filepath.Base(path)
-		}
-		path = parent
 	}
-}
-
-// lock takes the lock of the deploy directory, which the commands that change
-// it hold from their first look at the releases to their last change.
-func (l *Layout) lock(ctx context.Context) (unlock func(), err error) {
-	if err := os.MkdirAll(l.statePath(), 0o755); err != nil {
-		return nil, err
-	}
-	return fsutil.Lock(ctx, filepath.Join(l.statePath(), lockName), l.Waiting)
+	return -1
 }
 
 // checkCurrentLink fails if current exists and is not a symbolic link: a
 // switch could not replace it, and it tells nothing of the release in use.
-func (l *Layout) checkCurrentLink() error {
-	info, err := os.Lstat(l.currentPath())
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if info.Mode()&fs.ModeSymlink == 0 {
+func (l *Layout) checkCurrentLink(hist *history) error {
+	if hist.strayCurrent && !hist.currentIsLink {
 		return fmt.Errorf("%s exists and is not a symbolic link", l.currentPath())
 	}
 	return nil
@@ -299,54 +396,38 @@ func (l *Layout) checkCurrentLink() error {
 //
 // Creating the link is the step of a switch that can fail for lack of space:
 // it comes before the changes that the switch completes.
-func (l *Layout) prepareSwitch(id string) error {
-	next := l.nextLinkPath()
-	if err := os.Remove(next); err != nil && !errors.Is(err, fs.ErrNotExist) {
+func (h *handles) prepareSwitch(id string) error {
+	if err := h.state.Unlink(nextLinkName); err != nil {
 		return err
 	}
 	// The link is read where it ends up, in the deploy directory.
-	return os.Symlink(filepath.Join(releasesName, id), next)
+	return h.state.Symlink(filepath.Join(releasesName, id), nextLinkName)
 }
 
 // cancelSwitch removes the link of prepareSwitch.
-func (l *Layout) cancelSwitch() {
-	_ = os.Remove(l.nextLinkPath())
+func (h *handles) cancelSwitch() {
+	_ = h.state.Unlink(nextLinkName)
 }
 
 // commitSwitch points current to the release of prepareSwitch: at every
 // instant, current points to the old release or to the new one. After an
 // error, it still points to the old one.
-func (l *Layout) commitSwitch() error {
-	if err := os.Rename(l.nextLinkPath(), l.currentPath()); err != nil {
-		l.cancelSwitch()
+func (l *Layout) commitSwitch(h *handles) error {
+	if err := h.state.Rename(nextLinkName, h.root, currentName); err != nil {
+		h.cancelSwitch()
 		return underlying(err)
 	}
 	// The switch is done: what is left is to make it survive a crash.
-	if err := fsutil.SyncDir(l.dir); err != nil {
+	if err := h.root.Sync(); err != nil {
 		l.warn("%s is switched, but a crash may undo the switch: %v", l.currentPath(), err)
 	}
 	return nil
 }
 
-// ensureTrash creates the trash.
-//
-// Only the user of capze can enter it: a release keeps there the files,
-// setuid programs included, that the permissions of releases may have
-// protected.
-func (l *Layout) ensureTrash() error {
-	if err := os.MkdirAll(l.statePath(), 0o755); err != nil {
-		return err
-	}
-	if err := os.Mkdir(l.trashPath(), 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-		return err
-	}
-	return nil
-}
-
 // discard moves the release out of releases, into the trash, where pruning
-// deletes it. It returns the new path of the release.
-func (l *Layout) discard(r Release) (string, error) {
-	if err := l.ensureTrash(); err != nil {
+// deletes it. It returns the name of the release in the trash.
+func (h *handles) discard(r Release) (string, error) {
+	if err := h.ensureTrash(); err != nil {
 		return "", err
 	}
 	for n := 0; ; n++ {
@@ -355,20 +436,19 @@ func (l *Layout) discard(r Release) (string, error) {
 			// A directory left in the trash by hand has the name.
 			name = fmt.Sprintf("%s.%d", r.ID, n)
 		}
-		dst := filepath.Join(l.trashPath(), name)
-		if _, err := os.Lstat(dst); err == nil {
+		if _, err := h.trash.Lstat(name); err == nil {
 			continue
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return "", err
 		}
-		if err := os.Rename(r.Path, dst); err != nil {
+		if err := h.releases.Rename(r.ID, h.trash, name); err != nil {
 			return "", underlying(err)
 		}
-		return dst, nil
+		return name, nil
 	}
 }
 
-// underlying returns the cause of an error of os.Rename, whose message
+// underlying returns the cause of an error of a rename, whose message
 // otherwise repeats both paths.
 func underlying(err error) error {
 	var link *os.LinkError
@@ -376,19 +456,4 @@ func underlying(err error) error {
 		return link.Err
 	}
 	return err
-}
-
-// inside reports whether the file path is the directory dir, or below it,
-// whatever the paths that lead to them: it compares the files. Both exist.
-func inside(path string, dir fs.FileInfo) bool {
-	for {
-		if info, err := os.Stat(path); err == nil && os.SameFile(info, dir) {
-			return true
-		}
-		parent := filepath.Dir(path)
-		if parent == path {
-			return false
-		}
-		path = parent
-	}
 }

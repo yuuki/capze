@@ -36,12 +36,12 @@ DEPLOY_DIR
 │   ├── 20261112093000
 │   └── 20261113101500
 └── .capze
-    ├── lock
     └── trash
 ```
 
 `DEPLOY_DIR` is one file system: every change below is a `rename(2)` inside
-it.
+it. `releases`, `.capze` and `.capze/trash` are directories of their own, on
+the mount of `DEPLOY_DIR`.
 
 ## Decisions
 
@@ -77,9 +77,8 @@ shell variable must not turn into the deploy directory. And a path with a
 `..` after a symbolic link: `filepath.Abs` removes the `..` with the link,
 while the kernel follows the link first.
 
-`releases` and `.capze/trash` must be on one file system, or no release
-could be discarded or deleted: a deployment checks it before it changes
-anything.
+An empty `--to` is refused for the same reason as an empty path: it is what
+an unset variable gives, not a request for the release before.
 
 ### Release names are deployment times that always increase
 
@@ -145,17 +144,46 @@ read from the directory at any time, also after `current` was changed by
 hand. A release that was moved into `releases` by a deployment that crashed
 before the switch is in the same state, and is discarded the same way.
 
-A deployment either does all of this or none of it. The source is moved
-first, because that is the step that can fail for reasons no check sees (the
-source is a mount point, or is reached through another mount of the same
-file system). If a rolled-back release then cannot be discarded, the
-releases already discarded and the source are moved back, and the
-deployment fails with everything where it was.
+A deployment either does all of this or none of it. The rolled-back
+releases leave first, so that the history never holds both them and the new
+release, even if the deployment is killed in between. If the source then
+cannot be moved, they are moved back, and the deployment fails with
+everything where it was.
 
 Alternatives considered: a journal of the switches (state that can disagree
 with the directory, and cannot be repaired with `ls`), a marker file in the
 bad release (capze would write into the content it deploys), and leaving the
 problem to the operator (the failure appears only during a second incident).
+
+### capze works in open directories, and follows no link of the layout
+
+Every command opens `DEPLOY_DIR`, then `releases`, `.capze` and
+`.capze/trash` from it, and does everything else by the names of entries in
+these open directories (`openat(2)`, `renameat(2)`, `unlinkat(2)`): no path
+is resolved a second time. A command fails, before it changes anything, if
+one of the three is a symbolic link, a file, or a mount point.
+
+The reason is what capze would otherwise delete. With a `.capze/trash` that
+is a symbolic link, or that has a file system mounted on it, pruning would
+empty the directory it leads to; with a `releases` that is a link, it would
+delete every `YYYYMMDDhhmmss` directory found there, which capze did not
+create. Checking the paths first is not enough for a tool that runs as root:
+what a path leads to can change between the check and the use.
+
+The source of a deployment is handled the same way. It is opened once,
+without following a link at its end; what is checked (it is a directory, not
+a mount point, on the mount of the deploy directory, neither inside a
+release nor around the deploy directory) is the directory that is open, and
+after the move capze verifies that the new release is that directory. If
+the path led to something else by then, the move is undone and the
+deployment fails. Whether a source is inside the deploy directory is told
+by the directories that really hold it (`..` from the open directory), not
+by its path: `current/app` is a part of a release, whatever it looks like.
+
+capze still resolves the paths of its command line as the kernel does,
+through the symbolic links of their parent directories. Running it as root
+on a `SOURCE_DIR` or `DEPLOY_DIR` below a directory that another user can
+write lets that user choose what the path leads to; see `SECURITY.md`.
 
 ### Releases are deleted through the trash
 
@@ -209,12 +237,20 @@ leaves it whole, with the same error, if there is one. This look is a
 courtesy, not the guarantee: a mount made after it, or a system where the
 list cannot be read, is still stopped by the check on every directory.
 
-Known limits. `RemoveTree` keeps one directory open per level of the tree,
-so a tree deeper than the limit of open files of the process is not deleted
-(it stays in the trash, and pruning reports it each time). A release that
-its owner may not read or write is still deleted by its owner: the
-permissions of its directories are given back first, never those of a
-symbolic link's target or of a mount point.
+The content of a release is not trusted, and must not be able to stop its
+deletion for ever, or the trash would fill the disk:
+
+- Depth. `RemoveTree` keeps a bounded number of directories open. A
+  directory deeper than that (or than the limit of open files allows) is
+  moved to the root of the tree being deleted, and deleted from there. No
+  path of the tree is given to the kernel, nor kept per level.
+- Permissions. A release that its owner may not read or write is still
+  deleted by its owner: the permissions of its directories are given back
+  first, never those of a symbolic link's target or of a mount point.
+- Files created meanwhile. A directory is read again a few times to find
+  entries that the first reading skipped. If something keeps creating files
+  in it, the deletion fails with "directory not empty" instead of running,
+  with the lock held, as long as the other process does.
 
 ### Pruning counts back from the current release
 
@@ -257,14 +293,19 @@ schedules the writes, so the guarantee is weaker there.
 
 ### One lock per deploy directory
 
-`deploy`, `rollback` and `prune` hold `flock(2)` on `.capze/lock` from their
-first look at the releases to their last change, so that two of them never
-choose the same name or delete what the other is switching to. A command
-waits for the lock, and says so; it does not fail, because a deployment that
-overlaps a scheduled `prune` is normal. The kernel releases the lock when
-the process ends, so a lock is never stale. `list` and `prune --dry-run`
-take no lock and create nothing; `list` works for a user who may only read
-the deploy directory.
+`deploy`, `rollback` and `prune` hold `flock(2)` on the directory `.capze`
+from their first look at the releases to their last change, so that two of
+them never choose the same name or delete what the other is switching to.
+The lock is on the directory itself: a lock file could be deleted while a
+command holds it, and the next command would lock a new file and run at the
+same time. A command waits for the lock, and says so; it does not fail,
+because a deployment that overlaps a scheduled `prune` is normal. The kernel
+releases the lock when the process ends, so a lock is never stale.
+
+`list` and `prune --dry-run` take no lock and create nothing; `list` works
+for a user who may only read the deploy directory. `rollback` and `prune`
+create nothing either in a directory that has no `releases`: a path that is
+not a deploy directory (a release, for instance) is left as it is.
 
 ### Interruption
 
