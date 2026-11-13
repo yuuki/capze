@@ -1,0 +1,135 @@
+# Release configuration, run by .github/workflows/release.yml on a tag vX.Y.Z.
+#
+# The release workflow runs CI first, so this file has no test or
+# `go mod tidy` hooks: a release builds exactly the tagged tree.
+version: 2
+
+project_name: capze
+
+builds:
+  - id: capze
+    main: .
+    binary: capze
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    # Reproducible: no local paths, and file times taken from the commit.
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: capze
+    ids: [capze]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Fixed owners, modes and times, so that the archives are reproducible
+    # too, whoever builds them.
+    builds_info:
+      owner: root
+      group: root
+      mode: 0755
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: LICENSE
+        info: &doc
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info: *doc
+
+# deb and rpm packages for the servers capze deploys on:
+# capze_1.0.0-1_amd64.deb, capze-1.0.0-1.x86_64.rpm (arm64/aarch64). The
+# binary is static, so the packages have no dependencies and suit every
+# distribution.
+nfpms:
+  - id: packages
+    ids: [capze]
+    package_name: capze
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats: [deb, rpm]
+    vendor: yuuki
+    homepage: https://github.com/yuuki/capze
+    maintainer: Yuuki Tsubouchi <yuki.tsubo@gmail.com>
+    description: |-
+      Deploys directories in a Capistrano-like layout
+      capze moves a directory into releases/ as a new release, switches the
+      current symbolic link to it atomically, rolls back to the release
+      before, and deletes the old releases without ever deleting through a
+      mount point.
+    license: MIT
+    section: admin
+    priority: optional
+    release: "1"
+    bindir: /usr/bin
+    mtime: "{{ .CommitDate }}"
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/capze/copyright
+        packager: deb
+        file_info: &pkgfile
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+      - src: LICENSE
+        dst: /usr/share/licenses/capze/LICENSE
+        packager: rpm
+        type: license
+        file_info: *pkgfile
+      - src: README.md
+        dst: /usr/share/doc/capze/README.md
+        file_info: *pkgfile
+    rpm:
+      summary: Deploys directories in a Capistrano-like layout
+      # Rather than the name of the machine that builds it: reproducible.
+      buildhost: localhost
+
+# capze_<version>_checksums.txt, which the release workflow attests with
+# every asset it lists.
+checksum:
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# The release notes: the commits since the previous tag, which follow
+# Conventional Commits (AGENTS.md), grouped by type.
+changelog:
+  sort: asc
+  use: git
+  groups:
+    - title: Breaking changes
+      regexp: '^[a-z]+(\([a-z-]+\))?!:'
+      order: 0
+    - title: Features
+      regexp: '^feat(\([a-z-]+\))?:'
+      order: 1
+    - title: Fixes
+      regexp: '^(fix|perf|revert)(\([a-z-]+\))?:'
+      order: 2
+    - title: Other changes
+      order: 9
+  filters:
+    exclude:
+      - "^test"
+      - "^ci"
+      - "^chore"
+      - "^Merge "
+
+release:
+  # v1.2.3-rc.1 and the like are marked as pre-releases.
+  prerelease: auto
+  # Running the release workflow again for a tag replaces its assets.
+  replace_existing_artifacts: true
+  # One line per paragraph: GitHub renders line breaks in release notes.
+  footer: |
+    ## Verifying the downloads
+
+    Every asset and `capze_{{ .Version }}_checksums.txt` have a signed [build provenance attestation](https://github.com/yuuki/capze/attestations) stating that the release workflow of this repository built them from `{{ .Tag }}`. Verify one with the [GitHub CLI](https://cli.github.com):
+
+    ```console
+    $ gh attestation verify capze_{{ .Version }}_linux_amd64.tar.gz --repo yuuki/capze
+    ```
